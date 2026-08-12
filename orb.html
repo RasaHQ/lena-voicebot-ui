@@ -1,0 +1,1647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice Assistant</title>
+  <!-- WebGL orb renderer. Loads the vendored copy first (works fully offline);
+       falls back to the public CDN if the local file is missing. -->
+  <script src="vendor/ogl.umd.js"
+          onerror="this.onerror=null;var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/ogl/dist/ogl.umd.js';document.head.appendChild(s);"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #080a12;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+      transition: padding-bottom 0.2s ease;
+    }
+    body.debug-open { padding-bottom: 38vh; }
+
+    #main-layout {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      gap: 3.5rem;
+    }
+
+    #orb-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    /* ---- orb ---- */
+    .orb-scene {
+      position: relative;
+      width: 220px;
+      height: 220px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 1.5rem;
+    }
+
+    #glow {
+      position: absolute;
+      inset: -40px;
+      border-radius: 50%;
+      background: radial-gradient(circle, var(--glow-color, #3a6cff) 0%, transparent 70%);
+      filter: blur(40px);
+      opacity: 0.2;
+      transition: opacity 0.1s, background 0.5s;
+      pointer-events: none;
+    }
+
+    #orb {
+      position: relative;
+      width: 200px;
+      height: 200px;
+      border-radius: 50%;
+      overflow: hidden;
+      box-shadow: 0 0 80px rgba(58, 108, 255, 0.35);
+      transition: transform 0.1s ease-out, box-shadow 0.3s;
+      will-change: transform;
+    }
+
+    #orb canvas {
+      width: 100% !important;
+      height: 100% !important;
+      display: block;
+    }
+
+    /* ---- state label ---- */
+    #page-demo-title {
+      font-size: 0.75rem;
+      font-weight: 500;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #3d4466;
+      margin-bottom: 1.5rem;
+    }
+
+    .state-label {
+      font-size: 0.85rem;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #64748b;
+      height: 1.2em;
+      margin-bottom: 1.5rem;
+      transition: color 0.6s ease, opacity 0.4s ease;
+    }
+    .state-label.listening { color: #3b82f6; }
+    .state-label.thinking  { color: #a855f7; }
+    .state-label.speaking  { color: #34d399; }
+
+    /* ---- controls ---- */
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+
+    button {
+      padding: 0.6rem 1.4rem;
+      border-radius: 9999px;
+      border: 1px solid #2d3148;
+      background: #1a1d2e;
+      color: #94a3b8;
+      font-size: 0.875rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s, transform 0.1s;
+      letter-spacing: 0.03em;
+    }
+    button:active  { transform: scale(0.96); }
+    button:disabled { opacity: 0.3; cursor: not-allowed; }
+    button:not(:disabled):hover { background: #232640; color: #e2e8f0; }
+
+    #btn-connect    { border-color: #4a5099; color: #7c83f5; }
+    #btn-mute.muted { border-color: #7f1d1d; color: #fca5a5; background: #1c0a0a; }
+
+    /* ---- chat column ---- */
+    #chat-col {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    #chat-col.hidden { display: none; }
+
+    #chat-label {
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #2d3455;
+    }
+
+    /* ---- chat ---- */
+    #chat {
+      width: 360px;
+      height: 420px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding-right: 2px;
+      scroll-behavior: smooth;
+    }
+
+    #chat::-webkit-scrollbar { width: 3px; }
+    #chat::-webkit-scrollbar-track { background: transparent; }
+    #chat::-webkit-scrollbar-thumb { background: #1e2136; border-radius: 99px; }
+
+    .chat-msg {
+      font-size: 0.875rem;
+      color: #94a3b8;
+      line-height: 1.6;
+      padding: 0.5rem 0.75rem;
+      background: #0d0f1a;
+      border: 1px solid #1a1e33;
+      border-radius: 10px;
+      border-bottom-left-radius: 3px;
+      animation: msgIn 0.25s ease;
+      align-self: flex-start;
+      max-width: 82%;
+    }
+
+    .chat-msg.user {
+      color: #c4cde8;
+      background: #111528;
+      border-color: #252a45;
+      border-bottom-left-radius: 10px;
+      border-bottom-right-radius: 3px;
+      align-self: flex-end;
+      text-align: right;
+      max-width: 82%;
+    }
+
+    /* extra gap when the speaker changes */
+    .chat-msg + .chat-msg.user,
+    .chat-msg.user + .chat-msg:not(.user) {
+      margin-top: 0.6rem;
+    }
+
+    .chat-meta {
+      font-size: 0.72rem;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-align: center;
+      padding: 0.15rem 0;
+      animation: msgIn 0.2s ease;
+    }
+
+    .chat-meta.skill {
+      color: #4a5099;
+    }
+
+    .chat-meta.skill::before { content: "— "; }
+    .chat-meta.skill::after  { content: " —"; }
+
+    .chat-meta.interrupted {
+      color: #7f6020;
+    }
+
+    .chat-meta.session-start { color: #1a3b28; }
+    .chat-meta.session-start::before { content: "— "; }
+    .chat-meta.session-start::after  { content: " —"; }
+
+    .chat-meta.session-end { color: #3b1e1e; }
+    .chat-meta.session-end::before { content: "— "; }
+    .chat-meta.session-end::after  { content: " —"; }
+
+    #rasa-logo {
+      position: fixed;
+      top: 1.25rem;
+      right: 1.5rem;
+      width: 72px;
+      opacity: 0.18;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    @keyframes msgIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ---- log (hidden) ---- */
+    #log { display: none; }
+
+    /* ---- debug panel ---- */
+    #btn-debug, #btn-transcript { font-size: 0.72rem; padding: 0.4rem 0.75rem; border-color: #1e2136; color: #3d4466; }
+    #btn-debug.active, #btn-transcript.active { border-color: #4a5099; color: #7c83f5; }
+
+    #debug-panel {
+      display: none;
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      height: 38vh;
+      min-height: 80px;
+      max-height: 90vh;
+      background: #07090f;
+      border-top: 1px solid #1e2136;
+      flex-direction: column;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 0.72rem;
+      z-index: 999;
+    }
+    #debug-panel.open { display: flex; }
+
+    #dbg-resize {
+      position: absolute;
+      top: -4px; left: 0; right: 0;
+      height: 8px;
+      cursor: ns-resize;
+      z-index: 1000;
+    }
+    #dbg-resize::after {
+      content: '';
+      display: block;
+      position: absolute;
+      top: 3px; left: 50%;
+      transform: translateX(-50%);
+      width: 32px; height: 3px;
+      border-radius: 99px;
+      background: #1e2136;
+      transition: background 0.15s;
+    }
+    #dbg-resize:hover::after { background: #3d4466; }
+
+    .dbg-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.35rem 0.75rem;
+      background: #0d0f1a;
+      border-bottom: 1px solid #1e2136;
+      color: #4a5099; font-weight: 700; letter-spacing: 0.1em;
+      flex-shrink: 0;
+    }
+    .dbg-header-title { color: #7c83f5; font-weight: 400; font-size: 0.68rem; }
+    .dbg-clear {
+      background: none; border: 1px solid #1e2136; color: #3d4466;
+      padding: 0.15rem 0.5rem; border-radius: 4px; cursor: pointer;
+      font-size: 0.65rem; letter-spacing: 0.04em;
+    }
+    .dbg-clear:hover { color: #94a3b8; border-color: #3d4466; }
+
+    .dbg-metrics-section { flex-shrink: 0; }
+    .dbg-metrics-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.2rem 0.75rem; cursor: pointer;
+      color: #2d3455; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em;
+      border-bottom: 1px solid transparent;
+      user-select: none; transition: color 0.15s;
+    }
+    .dbg-metrics-header:hover { color: #4a5099; }
+    .dbg-metrics-section.collapsed .dbg-metrics { display: none; }
+    .dbg-metrics-section.collapsed .dbg-metrics-header { border-bottom: 1px solid #1e2136; }
+
+    .dbg-metrics {
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      gap: 0.25rem 0.75rem; padding: 0.4rem 0.75rem;
+      border-bottom: 1px solid #1e2136;
+    }
+    .dbg-m { display: flex; flex-direction: column; gap: 0.05rem; }
+    .dbg-m .lbl { color: #2d3455; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .dbg-m .val { color: #64748b; }
+    .dbg-m .val.ok   { color: #34d399; }
+    .dbg-m .val.warn { color: #f59e0b; }
+    .dbg-m .val.err  { color: #f87171; }
+
+    .dbg-body {
+      display: flex; flex: 1; overflow: hidden; min-height: 0;
+    }
+    .dbg-left {
+      display: flex; flex-direction: column;
+      width: 33.3%; border-right: 1px solid #1e2136; overflow: hidden; flex-shrink: 0;
+    }
+    .dbg-right {
+      flex: 1; display: flex; flex-direction: column; overflow: hidden;
+    }
+
+    .dbg-events {
+      flex: 1; overflow-y: auto; padding: 0.25rem 0.75rem;
+    }
+    .dbg-events::-webkit-scrollbar { width: 3px; }
+    .dbg-events::-webkit-scrollbar-thumb { background: #1e2136; border-radius: 99px; }
+    .dbg-ev { color: #2d3455; padding: 0.06rem 0; white-space: pre; }
+    .dbg-ev.tx   { color: #1e3a5f; }
+    .dbg-ev.rx   { color: #1a3040; }
+    .dbg-ev.st   { color: #3b1d6e; }
+    .dbg-ev.ok   { color: #064e3b; }
+    .dbg-ev.warn { color: #78350f; }
+    .dbg-ev.err  { color: #7f1d1d; }
+
+    /* ---- trace panel ---- */
+    .dbg-trace-header {
+      padding: 0.35rem 0.75rem; background: #0d0f1a;
+      border-bottom: 1px solid #1e2136;
+      color: #3d4466; font-size: 0.65rem; font-weight: 700;
+      letter-spacing: 0.1em; flex-shrink: 0;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    #dbg-timeline { cursor: grab; }
+    #dbg-timeline:active { cursor: grabbing; }
+  </style>
+</head>
+<body>
+
+<div id="main-layout">
+  <div id="orb-col">
+    <div id="page-demo-title"></div>
+    <div class="orb-scene">
+      <div id="glow"></div>
+      <div id="orb"></div>
+    </div>
+    <div class="state-label" id="state-label">—</div>
+    <div class="controls">
+      <button id="btn-connect">Connect</button>
+      <button id="btn-disconnect" style="display:none">Disconnect</button>
+      <button id="btn-mute" disabled>Mute</button>
+      <button id="btn-debug">Debug</button>
+      <button id="btn-transcript">Transcript</button>
+    </div>
+  </div>
+  <div id="chat-col" class="hidden">
+    <div id="chat-label">Transcript</div>
+    <div id="chat"></div>
+  </div>
+</div>
+
+<div id="log"></div>
+
+<svg id="rasa-logo" viewBox="0 0 305 144" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M224.03 26.228V80.9896H237.144V64.477H265.557V80.8694H278.671V26.228H224.03ZM265.557 51.3631H237.144V39.342H265.557V51.3631Z" fill="white"/>
+  <path d="M212.009 56.2808V69.9411V80.8694H158.46V67.7555H198.895V60.1057H158.46V48.0846V34.4242V26.228H212.009V39.342H171.574V46.9918H212.009V56.2808Z" fill="white"/>
+  <path d="M91.7976 26.228V80.9896H104.912V64.477H133.325V80.8694H146.439V26.228H91.7976ZM133.325 51.3631H104.912V39.342H133.325V51.3631Z" fill="white"/>
+  <path d="M62.193 60.0401L78.9788 53.9312L79.7766 53.6143V26.228H26.228V80.8694H39.1671V68.4002L49.0026 64.8376L63.8104 80.8694H80.0061L62.193 60.0401ZM39.2436 54.4448V39.342H66.6626V44.4564L39.2436 54.4448Z" fill="white"/>
+  <path d="M264.082 93.4805H290.255V14.6876H14.6877V93.4805H211.397L264.027 119.512V93.4805H264.082ZM0.00012207 0H304.899V108.19H278.769V143.16L207.987 108.19H0.00012207V0Z" fill="white"/>
+</svg>
+
+<div id="debug-panel">
+  <div id="dbg-resize"></div>
+  <div class="dbg-header">
+    <span>DEBUG</span>
+    <span class="dbg-header-title" id="dbg-title">—</span>
+    <div style="display:flex;gap:0.4rem;">
+      <button class="dbg-clear" onclick="downloadDebugReport()">Download</button>
+      <button class="dbg-clear" onclick="clearDbgEvents()">Clear</button>
+    </div>
+  </div>
+  <div class="dbg-body">
+    <div class="dbg-left">
+      <div class="dbg-metrics-section collapsed" id="dbg-metrics-section">
+        <div class="dbg-metrics-header" onclick="toggleDbgMetrics()">
+          <span>METRICS</span>
+          <span id="dbg-metrics-chevron">▸</span>
+        </div>
+        <div class="dbg-metrics" id="dbg-metrics"></div>
+      </div>
+      <div class="dbg-events" id="dbg-events"></div>
+    </div>
+    <div class="dbg-right">
+      <div class="dbg-trace-header">
+        <span>PIPELINE TIMELINE</span>
+        <button class="dbg-clear" onclick="clearTimeline()">Clear</button>
+      </div>
+      <canvas id="dbg-timeline" style="flex:1;width:100%;min-height:0;display:block;"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+//  CONFIGURATION
+//  ────────────
+//  The orb connects to a Rasa Pro voice channel over a WebSocket. By default it
+//  targets the custom `websockets` channel (channel/websockets.py) on a bot
+//  running locally, which streams the transcript, active-skill and tool-call
+//  trace events that power the transcript + debug panels.
+//
+//  Override any of these without editing the file via query params, e.g.
+//    orb.html?host=localhost&port=5005
+//    orb.html?ws=ws://192.168.1.50:5005/webhooks/websockets/websocket
+//    orb.html?title=Acme%20Support
+// ═══════════════════════════════════════════════════════════════════════════
+
+const params = new URLSearchParams(location.search);
+
+const CONFIG = {
+  host:     params.get('host') || location.hostname || 'localhost',
+  port:     params.get('port') || '5005',
+  channel:  params.get('channel') || 'websockets',
+  ws:       params.get('ws') || null,
+  title:    params.get('title') || 'Voice Assistant',
+  language: params.get('lang') || 'en-US',
+  sampleRate: parseInt(params.get('rate'), 10) || 48000,
+};
+
+function buildWsUrl() {
+  if (CONFIG.ws) return CONFIG.ws;
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${scheme}//${CONFIG.host}:${CONFIG.port}/webhooks/${CONFIG.channel}/websocket`;
+}
+
+document.title = CONFIG.title;
+{
+  const el = document.getElementById('page-demo-title');
+  if (el) el.textContent = CONFIG.title;
+}
+
+// ─────────────────────────────────────────────
+// 1. WebGL orb
+// ─────────────────────────────────────────────
+
+const { Color, Mesh, Program, Renderer, Triangle } = ogl;
+
+const VERT = `
+attribute vec2 uv;
+attribute vec2 position;
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = vec4(position, 0, 1);
+}`;
+
+const FRAG = `
+precision highp float;
+uniform float uTime;
+uniform vec3  uColor;
+uniform vec3  uResolution;
+uniform float uSpeed;
+varying vec2  vUv;
+
+void main() {
+  float mr = min(uResolution.x, uResolution.y);
+  vec2 uv = (vUv * 2.0 - 1.0) * uResolution.xy / mr;
+  float d = -uTime * 0.5 * uSpeed;
+  float a = 0.0;
+  for (float i = 0.0; i < 8.0; ++i) {
+    a += cos(i - d - a * uv.x);
+    d += sin(uv.y * i + a);
+  }
+  vec3 col = vec3(cos(uv * vec2(d, a)) * 0.6 + 0.4, cos(a + d) * 0.5 + 0.5);
+  col = cos(col * cos(vec3(d, a, 2.5)) * 0.5 + 0.5) * uColor;
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+const SIZE = 400;
+const orbEl = document.getElementById('orb');
+const renderer = new Renderer({ alpha: false, antialias: true });
+const { gl } = renderer;
+renderer.setSize(SIZE, SIZE);
+orbEl.appendChild(gl.canvas);
+
+const geometry = new Triangle(gl);
+const program  = new Program(gl, {
+  vertex: VERT, fragment: FRAG,
+  uniforms: {
+    uTime:       { value: 0 },
+    uColor:      { value: new Color(0.3, 0.6, 1.0) },
+    uResolution: { value: new Color(SIZE, SIZE, 1) },
+    uSpeed:      { value: 0.75 },
+  },
+});
+const mesh = new Mesh(gl, { geometry, program });
+
+// ─────────────────────────────────────────────
+// 2. State machine + color palette
+// ─────────────────────────────────────────────
+
+let agentState = 'idle';
+
+const COLORS = {
+  idle:      [0.1,  0.15, 0.45],
+  listening: [0.85, 0.1,  0.12],
+  thinking:  [0.55, 0.15, 0.9],
+  speaking:  [0.1,  0.8,  0.55],
+};
+
+const GLOW_CSS = {
+  idle:      '#0f1a6e',
+  listening: '#cc1a1f',
+  thinking:  '#7a18cc',
+  speaking:  '#14cc82',
+};
+
+let currentColor = [...COLORS.idle];
+let labelTimer   = null;
+
+function setState(s) {
+  if (agentState === s) return;
+  const _prev = agentState;
+  agentState = s;
+  dbgEvent('state  ' + _prev + ' → ' + s, 'st');
+  document.getElementById('glow').style.setProperty('--glow-color', GLOW_CSS[s]);
+  clearTimeout(labelTimer);
+  labelTimer = setTimeout(() => {
+    const el = document.getElementById('state-label');
+    el.textContent = s === 'idle' ? '—' : s.charAt(0).toUpperCase() + s.slice(1) + '…';
+    el.className = 'state-label ' + (s !== 'idle' ? s : '');
+  }, 400);
+}
+
+// ─────────────────────────────────────────────
+// 3. Audio analysis
+// ─────────────────────────────────────────────
+
+let audioCtx      = null;
+let micAnalyser   = null;
+let agentAnalyser = null;
+let micData       = null;
+let agentData     = null;
+
+function getAvgLevel(analyser, data) {
+  analyser.getByteFrequencyData(data);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) sum += data[i];
+  return Math.min(1, Math.max(0, (sum / data.length - 16) / 90));
+}
+
+function ensureAudioCtx() {
+  if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 48000 });
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+// ─────────────────────────────────────────────
+// 4. Animation loop
+// ─────────────────────────────────────────────
+
+let displayLevel = 0;
+let micSmooth    = 0;
+let agentSmooth  = 0;
+let speedSmooth  = 0.75;
+let thinkPhase   = 0;
+let silenceMs    = 0;
+let lastTs       = 0;
+let animTime     = 0; // shader time — driven by clamped dt, stays small and precise
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function lerpArr(a, b, t) { return a.map((v, i) => lerp(v, b[i], t)); }
+function lerpAsym(cur, target, tA, tD) { return lerp(cur, target, target > cur ? tA : tD); }
+
+function animate(ts) {
+  requestAnimationFrame(animate);
+  const dt = Math.max(0, Math.min((ts - lastTs) / 1000, 0.1));
+  lastTs = ts;
+  animTime   += dt;
+  thinkPhase += dt;
+
+  let rawMic = 0;
+  if (micAnalyser && micData) rawMic = getAvgLevel(micAnalyser, micData);
+  micSmooth = lerpAsym(micSmooth, rawMic, 0.07, 0.03);
+
+  let rawAgent = 0;
+  if (agentAnalyser && agentData) rawAgent = getAvgLevel(agentAnalyser, agentData);
+  agentSmooth = lerpAsym(agentSmooth, rawAgent, 0.07, 0.03);
+
+  if (agentState === 'listening') {
+    if (micSmooth < 0.03) {
+      silenceMs += dt * 1000;
+      if (silenceMs > 900) setState('thinking');
+    } else {
+      silenceMs = 0;
+    }
+  }
+
+  let target;
+  if      (agentState === 'speaking')   target = agentSmooth;
+  else if (agentState === 'listening')  target = micSmooth;
+  else if (agentState === 'thinking')   target = 0.22 + 0.18 * Math.sin(thinkPhase * 1.0);
+  else                                  target = 0.04 + 0.03 * Math.sin(thinkPhase * 0.3);
+
+  displayLevel = lerpAsym(displayLevel, target, 0.035, 0.02);
+  const targetSpeed = 0.75 + displayLevel * 0.35;
+  speedSmooth = lerp(speedSmooth, targetSpeed, 0.015);
+
+  program.uniforms.uTime.value  = animTime;
+  program.uniforms.uSpeed.value = speedSmooth;
+
+  const targetColor = COLORS[agentState];
+  currentColor = lerpArr(currentColor, targetColor, 0.025);
+  program.uniforms.uColor.value = new Color(...currentColor);
+
+  orbEl.style.transform = `scale(${1 + displayLevel * 0.28})`;
+  document.getElementById('glow').style.opacity = 0.15 + displayLevel * 1.5;
+
+  renderer.render({ scene: mesh });
+}
+requestAnimationFrame(animate);
+
+// ─────────────────────────────────────────────
+// 5. Rasa WebSocket
+// ─────────────────────────────────────────────
+
+const WS_URL      = buildWsUrl();
+const SAMPLE_RATE = CONFIG.sampleRate;
+
+let ws             = null;
+let muted          = false;
+let micStream      = null;
+let micSrcNode     = null; // module-level so stopMic() can disconnect it
+let workletNode    = null;
+let lastMarker     = null;
+let activeSources  = 0;
+let activeSrcNodes = []; // live AudioBufferSourceNodes — needed to stop them on interrupt
+let nextPlayTime   = 0;  // AudioContext timestamp when the next chunk should start
+let chunkBuffer    = ''; // accumulates streaming response chunks
+let _audioEpoch    = 0;  // incremented on stopBotAudio; guards stale onended callbacks
+
+const btnConnect    = document.getElementById('btn-connect');
+const btnDisconnect = document.getElementById('btn-disconnect');
+const btnMute       = document.getElementById('btn-mute');
+const logEl         = document.getElementById('log');
+
+function log(msg, type = '') {
+  const el = document.createElement('div');
+  el.className = 'e' + (type ? ' ' + type : '');
+  el.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+  logEl.appendChild(el);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// Decode base64 Linear16 PCM → Float32
+function decodeChunk(b64) {
+  const bin = atob(b64);
+  const buf = new ArrayBuffer(bin.length);
+  const u8  = new Uint8Array(buf);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  const i16 = new Int16Array(buf);
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+  return f32;
+}
+
+function playChunk(f32) {
+  ensureAudioCtx();
+
+  // Lazy-init agent analyser wired to destination
+  if (!agentAnalyser) {
+    agentAnalyser = audioCtx.createAnalyser();
+    agentAnalyser.fftSize = 1024;
+    agentAnalyser.connect(audioCtx.destination);
+    agentData = new Uint8Array(agentAnalyser.frequencyBinCount);
+  }
+
+  const ab    = audioCtx.createBuffer(1, f32.length, SAMPLE_RATE);
+  ab.getChannelData(0).set(f32);
+  const src   = audioCtx.createBufferSource();
+  const epoch = _audioEpoch; // capture epoch so stale onended can be ignored
+  src.buffer  = ab;
+  src.connect(agentAnalyser);
+
+  // Schedule chunk to start exactly when the previous one ends, not immediately.
+  // This prevents all chunks playing simultaneously (the "100 voices" distortion).
+  const startAt = Math.max(audioCtx.currentTime, nextPlayTime);
+  nextPlayTime = startAt + ab.duration;
+
+  activeSources++;
+  dbgAudioChunks++;
+  activeSrcNodes.push(src);
+  const _lag = ((nextPlayTime - audioCtx.currentTime) * 1000).toFixed(0);
+  dbgEvent('audio chunk  lag=' + _lag + 'ms  dur=' + (ab.duration * 1000).toFixed(0) + 'ms  active=' + activeSources, 'rx');
+  setState('speaking');
+
+  src.onended = () => {
+    // Ignore callbacks from a previous stopBotAudio() call — they would
+    // corrupt activeSources and reset nextPlayTime mid-utterance.
+    if (_audioEpoch !== epoch) return;
+    activeSrcNodes = activeSrcNodes.filter(s => s !== src);
+    activeSources = Math.max(0, activeSources - 1);
+    if (activeSources === 0) {
+      // All queued audio has played — echo final marker so server knows
+      // bot stopped speaking, then transition orb back to listening.
+      if (lastMarker !== null && ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ marker: lastMarker }));
+        lastMarker = null;
+      }
+      nextPlayTime = 0;
+      setState('listening');
+      silenceMs = 0;
+    }
+  };
+
+  src.start(startAt);
+}
+
+function appendChat(text, isUser = false) {
+  const chatEl = document.getElementById('chat');
+  const msg = document.createElement('div');
+  msg.className = isUser ? 'chat-msg user' : 'chat-msg';
+  msg.textContent = text;
+  chatEl.appendChild(msg);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+let _lastSkill = null;
+
+function appendMeta(text, type) {
+  const chatEl = document.getElementById('chat');
+  const meta = document.createElement('div');
+  meta.className = `chat-meta ${type}`;
+  meta.textContent = text;
+  chatEl.appendChild(meta);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function toggleChat() {
+  const col = document.getElementById('chat-col');
+  const btn = document.getElementById('btn-transcript');
+  const hidden = col.classList.toggle('hidden');
+  btn.classList.toggle('active', !hidden);
+}
+
+function stopBotAudio() {
+  // Increment epoch first — any onended callbacks that fire after this
+  // (from nodes we're about to stop) will see a different epoch and return early.
+  _audioEpoch++;
+  activeSrcNodes.forEach(s => { try { s.stop(); } catch {} });
+  activeSrcNodes = [];
+  activeSources = 0;
+  lastMarker = null;
+  nextPlayTime = 0;
+  if (agentAnalyser) {
+    agentAnalyser.disconnect();
+    agentAnalyser = null;
+    agentData = null;
+  }
+}
+
+const PCM_PROCESSOR = `
+class PCMCapture extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0]?.[0];
+    if (ch?.length) {
+      const i16 = new Int16Array(ch.length);
+      for (let i = 0; i < ch.length; i++)
+        i16[i] = Math.max(-32768, Math.min(32767, ch[i] * 32768));
+      this.port.postMessage(i16.buffer, [i16.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-capture', PCMCapture);
+`;
+
+async function startMic() {
+  ensureAudioCtx();
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+  });
+
+  micSrcNode = audioCtx.createMediaStreamSource(micStream);
+
+  micAnalyser = audioCtx.createAnalyser();
+  micAnalyser.fftSize = 1024;
+  micData = new Uint8Array(micAnalyser.frequencyBinCount);
+  micSrcNode.connect(micAnalyser);
+
+  const blob = new Blob([PCM_PROCESSOR], { type: 'application/javascript' });
+  await audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
+  workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture');
+  micSrcNode.connect(workletNode);
+
+  workletNode.port.onmessage = ({ data }) => {
+    if (muted || ws?.readyState !== WebSocket.OPEN) return;
+    const u8 = new Uint8Array(data);
+    let str = '';
+    for (let i = 0; i < u8.length; i++) str += String.fromCharCode(u8[i]);
+    ws.send(JSON.stringify({ audio: btoa(str) }));
+    dbgTxCount++;
+  };
+}
+
+function stopMic() {
+  workletNode?.disconnect();
+  workletNode = null;
+  if (micAnalyser) {
+    micAnalyser.disconnect();
+    micAnalyser = null;
+    micData = null;
+  }
+  micSrcNode?.disconnect();
+  micSrcNode = null;
+  micStream?.getTracks().forEach(t => t.stop());
+  micStream = null;
+}
+
+function disconnect(reason = '') {
+  if (btnDisconnect.style.display === 'none') return; // guard against double-call (e.g. btn + ws.onclose)
+  stopMic();
+  stopBotAudio();
+  // Close and release the AudioContext — prevents node graph accumulation across sessions.
+  // A fresh context is created on the next connect via ensureAudioCtx().
+  if (audioCtx) {
+    audioCtx.close().catch(() => {});
+    audioCtx = null;
+  }
+  if (reason) appendMeta(reason, 'session-end');
+  traceDisconnect(reason);
+  ws?.close();
+  ws = null;
+  _lastSkill = null;
+  // Chat is intentionally NOT cleared here — the end marker above stays visible
+  // until the next session starts, so there's a record of what happened.
+  setState('idle');
+  btnConnect.style.display    = '';
+  btnDisconnect.style.display = 'none';
+  btnMute.disabled            = true;
+  btnMute.textContent    = 'Mute';
+  btnMute.classList.remove('muted');
+  muted = false;
+}
+
+btnConnect.addEventListener('click', async () => {
+  btnConnect.style.display = 'none';
+  log('Connecting…');
+
+  try {
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = async () => {
+      log('Connected', 'ok');
+      sessionCount++;
+      sessionStart = Date.now();
+      dbgRxCount = 0; dbgTxCount = 0; dbgAudioChunks = 0;
+      _peakActiveSources = 0; _peakQueueLagMs = 0;
+      _dbgFullLog = []; _metricSnapshots = [];
+      const dbgTitleEl = document.getElementById('dbg-title');
+      if (dbgTitleEl) dbgTitleEl.textContent = 'Session ' + sessionCount;
+      dbgEvent('connected  session=' + sessionCount, 'ok');
+      traceConnect();
+      // Clear chat from previous session and mark the new one
+      document.getElementById('chat').innerHTML = '';
+      appendMeta('connected', 'session-start');
+      // Send init — tells server sample rate and language
+      ws.send(JSON.stringify({ sample_rate: SAMPLE_RATE, language: CONFIG.language }));
+      try {
+        await startMic();
+        log('Mic on', 'info');
+        setState('listening');
+        btnDisconnect.style.display = '';
+        btnMute.disabled       = false;
+      } catch (e) {
+        log('Mic error: ' + e.message, 'err');
+        disconnect('mic error');
+      }
+    };
+
+    ws.onmessage = ({ data }) => {
+      let msg;
+      try { msg = JSON.parse(data); } catch { return; }
+      dbgRxCount++;
+      if (msg.trace_event || msg.marker || msg.audio === undefined) console.log('[WS]', JSON.stringify(msg).slice(0, 120));
+
+      if (msg.trace_event) {
+        if (msg.trace_event === 'user_speaking_start') {
+          traceUserSpeaking();
+        } else if (msg.trace_event === 'transcript') {
+          traceTranscript(msg.text, msg.asr_ms);
+          if (msg.text) appendChat(msg.text, true);
+        } else if (msg.trace_event === 'tool_call') {
+          traceToolCall(msg.tool, msg.status, msg.args, msg.duration_ms, msg.error);
+        }
+      }
+
+      if (msg.marker !== undefined) {
+        dbgEvent('marker=' + msg.marker + (msg.final ? ' FINAL' : ''), 'rx');
+        if (msg.final) {
+          // End marker: store but don't echo yet.
+          // Echoed by onended when audio actually drains, keeping
+          // is_bot_speaking=true on the server until playback is done.
+          lastMarker = msg.marker;
+          if (msg.latency) traceTurnDone(msg.latency);
+        } else {
+          // Intermediate marker: echo immediately to keep is_bot_speaking=true.
+          lastMarker = msg.marker;
+          ws.send(JSON.stringify({ marker: msg.marker }));
+        }
+      }
+
+      if (msg.audio) {
+        traceTtsStart();
+        playChunk(decodeChunk(msg.audio));
+      }
+
+      // Streaming response: accumulate chunks, append on completion.
+      if (msg.response_chunk_start !== undefined) {
+        chunkBuffer = '';
+        traceLlmStart();
+      }
+      if (msg.response_chunk) {
+        chunkBuffer += msg.response_chunk;
+        traceLlmChunk(msg.response_chunk);
+      }
+      if (msg.response_chunk_end !== undefined) {
+        if (chunkBuffer) {
+          log('Bot: ' + chunkBuffer, 'info');
+          appendChat(chunkBuffer);
+          dbgEvent('response  ' + chunkBuffer.length + ' chars', 'ok');
+        }
+        chunkBuffer = '';
+      }
+
+      // Non-streaming response (welcome message, simple utterances).
+      if (msg.response) {
+        log('Bot: ' + msg.response, 'info');
+        appendChat(msg.response);
+      }
+
+      if (msg.skill) {
+        if (msg.skill !== _lastSkill) {
+          _lastSkill = msg.skill;
+          appendMeta(msg.skill, 'skill');
+          dbgEvent('skill → ' + msg.skill, 'st');
+          traceSkill(msg.skill);
+        }
+      }
+
+      if (msg.interruptPlayback) {
+        stopBotAudio();
+        setState('listening');
+        silenceMs = 0;
+        appendMeta('interrupted', 'interrupted');
+        log('Interrupted', 'warn');
+        dbgEvent('interrupt  sources stopped=' + activeSrcNodes.length, 'warn');
+        traceInterrupt();
+      }
+
+      if (msg.hangup) {
+        log('Call ended', 'warn');
+        disconnect('call ended');
+      }
+    };
+
+    ws.onerror = () => log('WS error', 'err');
+    ws.onclose = () => { log('Disconnected'); disconnect('disconnected'); };
+
+  } catch (e) {
+    log('Connect failed: ' + e.message, 'err');
+    btnConnect.style.display = '';
+  }
+});
+
+btnDisconnect.addEventListener('click', () => disconnect('disconnected'));
+
+btnMute.addEventListener('click', () => {
+  muted = !muted;
+  btnMute.textContent = muted ? 'Unmute' : 'Mute';
+  btnMute.classList.toggle('muted', muted);
+  log(muted ? 'Muted' : 'Unmuted', 'info');
+});
+
+// ─────────────────────────────────────────────
+// 6. Debug panel
+// ─────────────────────────────────────────────
+
+let sessionCount        = 0;
+let sessionStart        = null;
+let dbgRxCount          = 0;
+let dbgTxCount          = 0;
+let dbgAudioChunks      = 0;
+let _peakActiveSources  = 0;
+let _peakQueueLagMs     = 0;
+let _dbgFullLog         = []; // unbounded — survives DOM clear, used for download
+let _metricSnapshots    = []; // periodic snapshots for the report timeline
+let _lastSnapshotTime   = 0;
+
+const _dbgPanel    = document.getElementById('debug-panel');
+const _dbgEventsEl = document.getElementById('dbg-events');
+const _dbgMetrics  = document.getElementById('dbg-metrics');
+
+document.getElementById('btn-transcript').addEventListener('click', toggleChat);
+
+document.getElementById('btn-debug').addEventListener('click', () => {
+  const opening = !_dbgPanel.classList.contains('open');
+  _dbgPanel.classList.toggle('open');
+  document.getElementById('btn-debug').classList.toggle('active');
+  document.body.classList.toggle('debug-open');
+  if (!opening) document.body.style.paddingBottom = '';
+});
+
+function clearDbgEvents() {
+  _dbgEventsEl.innerHTML = '';
+}
+
+function toggleDbgMetrics() {
+  const section = document.getElementById('dbg-metrics-section');
+  const chevron = document.getElementById('dbg-metrics-chevron');
+  section.classList.toggle('collapsed');
+  chevron.textContent = section.classList.contains('collapsed') ? '▸' : '▾';
+}
+
+function dbgEvent(text, type) {
+  const now = new Date();
+  const ts  = now.toLocaleTimeString('en-GB', { hour12: false });
+  const ms  = String(now.getMilliseconds()).padStart(3, '0');
+  const line = ts + '.' + ms + '  ' + text;
+
+  // Persist to unbounded full log for download
+  _dbgFullLog.push({ ts: now.toISOString(), text, type });
+
+  // DOM display (capped)
+  const el = document.createElement('div');
+  el.className = 'dbg-ev' + (type ? ' ' + type : '');
+  el.textContent = line;
+  _dbgEventsEl.appendChild(el);
+  _dbgEventsEl.scrollTop = _dbgEventsEl.scrollHeight;
+  while (_dbgEventsEl.children.length > 300) {
+    _dbgEventsEl.removeChild(_dbgEventsEl.firstChild);
+  }
+}
+
+function _dbgMetricCell(lbl, val, cls) {
+  return '<div class="dbg-m"><div class="lbl">' + lbl + '</div>'
+       + '<div class="val' + (cls ? ' ' + cls : '') + '">' + val + '</div></div>';
+}
+
+function _wsStateName(state) {
+  return (['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'])[state] || '?';
+}
+
+function _updateDbgMetrics() {
+  const wsState   = ws ? _wsStateName(ws.readyState) : 'CLOSED';
+  const actxState = audioCtx ? audioCtx.state : 'none';
+  const lagMs     = audioCtx && nextPlayTime > audioCtx.currentTime
+    ? (nextPlayTime - audioCtx.currentTime) * 1000 : 0;
+
+  // Track peaks (always, even when panel is closed)
+  if (activeSources > _peakActiveSources) _peakActiveSources = activeSources;
+  if (lagMs > _peakQueueLagMs)            _peakQueueLagMs    = lagMs;
+
+  // Metric snapshots every 2s (always, panel state irrelevant)
+  const now = Date.now();
+  if (now - _lastSnapshotTime >= 2000) {
+    _lastSnapshotTime = now;
+    _metricSnapshots.push({
+      ts:       new Date(now).toISOString(),
+      ws:       wsState,
+      actx:     actxState,
+      actxTime: audioCtx ? audioCtx.currentTime.toFixed(2) : '0',
+      src:      activeSources,
+      lagMs:    Math.round(lagMs),
+      rx:       dbgRxCount,
+      tx:       dbgTxCount,
+      chunks:   dbgAudioChunks,
+    });
+  }
+
+  if (!_dbgPanel.classList.contains('open')) return;
+
+  const wsClass   = !ws ? 'err'
+    : ws.readyState === WebSocket.OPEN ? 'ok'
+    : ws.readyState === WebSocket.CONNECTING ? 'warn' : 'err';
+  const actxTime  = audioCtx ? audioCtx.currentTime.toFixed(2) + 's' : '—';
+  const actxClass = !audioCtx ? 'err'
+    : audioCtx.state === 'running' ? 'ok'
+    : audioCtx.state === 'suspended' ? 'warn' : 'err';
+  const lagStr    = lagMs > 0 ? lagMs.toFixed(0) + 'ms' : '0ms';
+  const lagClass  = lagMs > 3000 ? 'err' : lagMs > 1000 ? 'warn' : 'ok';
+  const srcClass  = activeSources > 8 ? 'err' : activeSources > 4 ? 'warn' : '';
+  const uptime    = sessionStart ? ((Date.now() - sessionStart) / 1000).toFixed(0) + 's' : '—';
+
+  _dbgMetrics.innerHTML = [
+    _dbgMetricCell('WS', wsState, wsClass),
+    _dbgMetricCell('AudioCtx', actxState, actxClass),
+    _dbgMetricCell('ActxTime', actxTime),
+    _dbgMetricCell('Sources', activeSources, srcClass),
+    _dbgMetricCell('QueueLag', lagStr, lagClass),
+    _dbgMetricCell('RX msgs', dbgRxCount),
+    _dbgMetricCell('TX msgs', dbgTxCount),
+    _dbgMetricCell('AudioChunks', dbgAudioChunks),
+    _dbgMetricCell('Session', sessionCount || '—'),
+    _dbgMetricCell('Uptime', uptime),
+  ].join('');
+}
+
+setInterval(_updateDbgMetrics, 500);
+
+function downloadDebugReport() {
+  const now      = new Date();
+  const dur      = sessionStart ? Math.round((Date.now() - sessionStart) / 1000) : 0;
+  const wsState  = ws ? _wsStateName(ws.readyState) : 'CLOSED';
+  const actxState = audioCtx ? audioCtx.state : 'none';
+  const uptime   = dur + 's';
+
+  const pad = (s, n) => String(s).padEnd(n);
+
+  const lines = [];
+
+  lines.push('VOICE AGENT DEBUG REPORT');
+  lines.push('========================');
+  lines.push('Generated   : ' + now.toISOString());
+  lines.push('Session     : ' + (sessionCount || '—'));
+  lines.push('Started     : ' + (sessionStart ? new Date(sessionStart).toISOString() : '—'));
+  lines.push('Duration    : ' + uptime);
+  lines.push('WS URL      : ' + WS_URL);
+  lines.push('Sample rate : ' + SAMPLE_RATE + ' Hz');
+  lines.push('User agent  : ' + navigator.userAgent);
+  lines.push('Page URL    : ' + location.href);
+  lines.push('');
+
+  lines.push('FINAL STATE');
+  lines.push('-----------');
+  lines.push('WS state       : ' + wsState);
+  lines.push('AudioCtx state : ' + actxState);
+  lines.push('RX messages    : ' + dbgRxCount);
+  lines.push('TX messages    : ' + dbgTxCount);
+  lines.push('Audio chunks   : ' + dbgAudioChunks);
+  lines.push('');
+
+  lines.push('PEAK VALUES');
+  lines.push('-----------');
+  lines.push('Active sources (max) : ' + _peakActiveSources);
+  lines.push('Queue lag (max)      : ' + Math.round(_peakQueueLagMs) + ' ms');
+  lines.push('');
+
+  if (_metricSnapshots.length) {
+    lines.push('METRIC SNAPSHOTS (every 2s)');
+    lines.push('---------------------------');
+    lines.push(pad('timestamp', 26) + pad('ws', 13) + pad('actx', 10) + pad('actxT', 8) + pad('src', 6) + pad('lag(ms)', 10) + pad('rx', 7) + pad('tx', 8) + 'chunks');
+    for (const s of _metricSnapshots) {
+      lines.push(
+        pad(s.ts, 26) + pad(s.ws, 13) + pad(s.actx, 10) + pad(s.actxTime + 's', 8) +
+        pad(s.src, 6) + pad(s.lagMs, 10) + pad(s.rx, 7) + pad(s.tx, 8) + s.chunks
+      );
+    }
+    lines.push('');
+  }
+
+  lines.push('FULL EVENT LOG');
+  lines.push('--------------');
+  for (const e of _dbgFullLog) {
+    const ts = e.ts.replace('T', ' ').replace('Z', '');
+    const tag = e.type ? '  [' + e.type + ']' : '';
+    lines.push(ts + '  ' + e.text + tag);
+  }
+  lines.push('');
+  lines.push('— end of report —');
+
+  const blob    = new Blob([lines.join('\n')], { type: 'text/plain' });
+  const url     = URL.createObjectURL(blob);
+  const a       = document.createElement('a');
+  const stamp   = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.href        = url;
+  a.download    = 'voice-debug-session' + (sessionCount || 0) + '-' + stamp + '.txt';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ─────────────────────────────────────────────
+// 7. Pipeline timeline (canvas Gantt chart)
+// ─────────────────────────────────────────────
+
+const _tlCanvas = document.getElementById('dbg-timeline');
+const _tlCtx    = _tlCanvas.getContext('2d');
+
+const _TL_LANES = [
+  { id: 'mic_wave', label: 'MIC', color: '#7c83f5', type: 'wave' },
+  { id: 'input',    label: 'ASR', color: '#38bdf8', type: 'bar'  },
+  { id: 'llm',      label: 'LLM', color: '#a855f7', type: 'bar'  },
+  { id: 'api',      label: 'API', color: '#fb923c', type: 'bar'  },
+  { id: 'tts',      label: 'TTS', color: '#34d399', type: 'bar'  },
+  { id: 'out_wave', label: 'OUT', color: '#34d399', type: 'wave' },
+];
+
+let _micSamples = [];   // [{t, v}] timestamped mic level history
+let _outSamples = [];   // [{t, v}] timestamped output level history
+const _TL_LABEL_W  = 48;    // logical px for lane labels column
+const _TL_PX_PER_S = 45;    // logical px per second
+const _TL_RIGHT_PAD = 0.8;  // seconds ahead of "now" to keep visible
+
+let _tlOrigin     = null;   // Date.now() at session start
+let _tlW          = 0;      // logical canvas width
+let _tlH          = 0;      // logical canvas height
+let _tlSegments   = [];     // { laneId, start, end|null, label }
+let _tlActive     = {};     // laneId → open segment ref
+let _tlTurns      = [];     // [seconds] turn separator positions
+let _tlBargeIns   = [];     // [seconds] barge-in event positions
+let _tlRafId      = null;
+let _tlPaused     = false;  // true after disconnect — time frozen
+let _tlPausedAt   = 0;      // seconds at which we paused
+let _tlViewOffset = 0;      // seconds scrolled back from live edge (0 = live)
+let _tracePlayingEmitted = false;
+
+function _tlNow() {
+  if (!_tlOrigin) return 0;
+  if (_tlPaused)  return _tlPausedAt;
+  return (Date.now() - _tlOrigin) / 1000;
+}
+
+function _tlResize() {
+  const dpr  = window.devicePixelRatio || 1;
+  const rect = _tlCanvas.getBoundingClientRect();
+  _tlW = rect.width;
+  _tlH = rect.height;
+  _tlCanvas.width  = Math.round(_tlW  * dpr);
+  _tlCanvas.height = Math.round(_tlH * dpr);
+  _tlCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function _tlDraw() {
+  const W = _tlW, H = _tlH;
+  if (!W || !H) { _tlRafId = requestAnimationFrame(_tlDraw); return; }
+
+  const ctx      = _tlCtx;
+  const laneH    = H / _TL_LANES.length;
+  const now      = _tlNow();
+  const visibleS = (W - _TL_LABEL_W) / _TL_PX_PER_S;
+  const rightT   = now - _tlViewOffset + _TL_RIGHT_PAD;
+  const leftT    = rightT - visibleS;
+  const isLive   = !_tlPaused && _tlViewOffset === 0;
+
+  // Sample audio levels — only while live (not paused)
+  if (!_tlPaused && _tlOrigin) {
+    const nowT = _tlNow();
+    const micV = (micAnalyser && micData)     ? getAvgLevel(micAnalyser, micData)     : 0;
+    const outV = (agentAnalyser && agentData) ? getAvgLevel(agentAnalyser, agentData) : 0;
+    _micSamples.push({ t: nowT, v: micV });
+    _outSamples.push({ t: nowT, v: outV });
+    // Prune samples scrolled well off the left edge
+    const pruneT = leftT - 5;
+    const cut = _micSamples.findIndex(s => s.t >= pruneT);
+    if (cut > 1) { _micSamples.splice(0, cut - 1); _outSamples.splice(0, cut - 1); }
+  }
+
+  function tX(t) { return _TL_LABEL_W + (t - leftT) * _TL_PX_PER_S; }
+
+  // Background
+  ctx.fillStyle = '#07090f';
+  ctx.fillRect(0, 0, W, H);
+
+  // Alternating lane bands
+  for (let i = 0; i < _TL_LANES.length; i++) {
+    ctx.fillStyle = i % 2 === 0 ? '#07090f' : '#080b15';
+    ctx.fillRect(_TL_LABEL_W, i * laneH, W - _TL_LABEL_W, laneH);
+  }
+
+  // 1-second grid lines
+  ctx.strokeStyle = '#0d1020';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([]);
+  const gStart = Math.ceil(leftT), gEnd = Math.floor(rightT) + 1;
+  for (let t = gStart; t <= gEnd; t++) {
+    const x = tX(t);
+    if (x < _TL_LABEL_W || x > W) continue;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    ctx.fillStyle = '#1e2136';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(t + 's', x + 2, 10);
+  }
+
+  // Turn separators
+  ctx.setLineDash([3, 4]);
+  ctx.strokeStyle = '#1e2a44';
+  ctx.lineWidth = 1;
+  for (const tv of _tlTurns) {
+    const x = tX(tv);
+    if (x < _TL_LABEL_W || x > W) continue;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+
+  // Barge-in markers — solid red verticals
+  ctx.setLineDash([]);
+  ctx.strokeStyle = '#ef4444';
+  ctx.lineWidth = 1.5;
+  for (const bt of _tlBargeIns) {
+    const x = tX(bt);
+    if (x < _TL_LABEL_W || x > W) continue;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    // Small label at top
+    ctx.fillStyle = '#ef4444';
+    ctx.font = 'bold 8px "SF Mono",monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('✕', x, 10);
+    ctx.textAlign = 'left';
+  }
+  ctx.setLineDash([]);
+
+  // Waveforms (MIC top, OUT bottom) — drawn on the same time axis as the bars
+  for (let i = 0; i < _TL_LANES.length; i++) {
+    const lane    = _TL_LANES[i];
+    if (lane.type !== 'wave') continue;
+    const samples = lane.id === 'mic_wave' ? _micSamples : _outSamples;
+    if (samples.length < 2) continue;
+    const baseY   = i * laneH + laneH - 2;
+    const maxH    = laneH - 4;
+
+    ctx.beginPath();
+    let started = false;
+    for (let s = 0; s < samples.length; s++) {
+      const x = tX(samples[s].t);
+      if (x < _TL_LABEL_W) continue;
+      if (x > W) break;
+      const wy = baseY - samples[s].v * maxH;
+      if (!started) { ctx.moveTo(x, baseY); ctx.lineTo(x, wy); started = true; }
+      else ctx.lineTo(x, wy);
+    }
+    if (!started) continue;
+    // Close back to baseline
+    const lastX = tX(samples[Math.min(samples.length - 1, samples.length - 1)].t);
+    ctx.lineTo(Math.min(lastX, W), baseY);
+    ctx.closePath();
+    ctx.fillStyle = lane.color;
+    ctx.globalAlpha = 0.5;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Bars
+  const barPad = Math.max(2, laneH * 0.18);
+  for (const seg of _tlSegments) {
+    const li = _TL_LANES.findIndex(l => l.id === seg.laneId);
+    if (li < 0) continue;
+    const lane = _TL_LANES[li];
+    const y    = li * laneH + barPad;
+    const barH = laneH - barPad * 2;
+    const x1   = tX(seg.start);
+    const endT = seg.end !== null ? seg.end : now;
+    const x2   = tX(endT);
+    const bx   = Math.max(x1, _TL_LABEL_W);
+    const bw   = Math.max(2, x2 - bx);
+    if (x2 < _TL_LABEL_W || x1 > W) continue;
+
+    ctx.globalAlpha = seg.end !== null ? 0.55 : 0.85;
+    ctx.fillStyle = lane.color;
+    ctx.beginPath();
+    ctx.roundRect(bx, y, Math.min(bw, W - bx), barH, 3);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    if (seg.label && bw > 36) {
+      ctx.fillStyle = '#fff';
+      ctx.globalAlpha = 0.75;
+      ctx.font = 'bold 9px "SF Mono","Fira Code",monospace';
+      ctx.textAlign = 'left';
+      const clip = new Path2D();
+      clip.rect(bx + 3, y, Math.min(bw - 6, W - bx - 3), barH);
+      ctx.save(); ctx.clip(clip);
+      ctx.fillText(seg.label, bx + 4, y + barH / 2 + 3);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // Lane label column
+  ctx.fillStyle = '#0d0f1a';
+  ctx.fillRect(0, 0, _TL_LABEL_W, H);
+  ctx.strokeStyle = '#1e2136';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(_TL_LABEL_W, 0); ctx.lineTo(_TL_LABEL_W, H); ctx.stroke();
+
+  for (let i = 0; i < _TL_LANES.length; i++) {
+    const lane = _TL_LANES[i];
+    const cy   = i * laneH + laneH / 2;
+    ctx.fillStyle = lane.color;
+    ctx.font = 'bold 9px "SF Mono","Fira Code",monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(lane.label, _TL_LABEL_W - 6, cy + 3);
+    if (i > 0) {
+      ctx.strokeStyle = '#0d0f1a';
+      ctx.beginPath();
+      ctx.moveTo(0, i * laneH); ctx.lineTo(W, i * laneH); ctx.stroke();
+    }
+  }
+  ctx.textAlign = 'left';
+
+  // "Now" cursor — only draw when live view is near right edge
+  if (_tlViewOffset < visibleS) {
+    const nowX = tX(now);
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(nowX, 0); ctx.lineTo(nowX, H); ctx.stroke();
+  }
+
+  // Status badge (top-right)
+  if (_tlOrigin) {
+    const badgeW = 62, badgeH = 16, badgeX = W - badgeW - 6, badgeY = 5;
+    if (_tlPaused) {
+      ctx.fillStyle = '#78350f55';
+      ctx.beginPath(); ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 3); ctx.fill();
+      ctx.fillStyle = '#f59e0b';
+      ctx.font = 'bold 9px "SF Mono",monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText('⏸ PAUSED', W - 10, badgeY + 11);
+    } else if (isLive) {
+      ctx.fillStyle = '#064e3b55';
+      ctx.beginPath(); ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 3); ctx.fill();
+      ctx.fillStyle = '#34d399';
+      ctx.font = 'bold 9px "SF Mono",monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText('● LIVE', W - 10, badgeY + 11);
+    } else {
+      ctx.fillStyle = '#1e213699';
+      ctx.beginPath(); ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 3); ctx.fill();
+      ctx.fillStyle = '#7c83f5';
+      ctx.font = 'bold 9px "SF Mono",monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText('▶ JUMP LIVE', W - 10, badgeY + 11);
+    }
+    ctx.textAlign = 'left';
+  }
+
+  _tlRafId = requestAnimationFrame(_tlDraw);
+}
+
+function _tlOpenSeg(laneId, label) {
+  if (!_tlOrigin) return;
+  const seg = { laneId, start: _tlNow(), end: null, label: label || '' };
+  _tlSegments.push(seg);
+  _tlActive[laneId] = seg;
+}
+
+function _tlCloseSeg(laneId) {
+  const seg = _tlActive[laneId];
+  if (seg) { seg.end = _tlNow(); delete _tlActive[laneId]; }
+}
+
+function _tlStartSession() {
+  _tlOrigin        = Date.now();
+  _tlSegments      = [];
+  _tlActive        = {};
+  _tlTurns         = [];
+  _tlBargeIns      = [];
+  _micSamples      = [];
+  _outSamples      = [];
+  _tlPaused        = false;
+  _tlPausedAt      = 0;
+  _tlViewOffset    = 0;
+  _tracePlayingEmitted = false;
+  // RAF loop runs continuously — no need to restart
+}
+
+function _tlStopSession() {
+  Object.keys(_tlActive).forEach(_tlCloseSeg);
+  _tlPausedAt = _tlNow();
+  _tlPaused   = true;
+}
+
+function clearTimeline() {
+  _tlSegments      = [];
+  _tlActive        = {};
+  _tlTurns         = [];
+  _tlBargeIns      = [];
+  _micSamples      = [];
+  _outSamples      = [];
+  _tlViewOffset    = 0;
+  _tracePlayingEmitted = false;
+}
+
+// Public API called by ws.onmessage and connection handlers
+function traceConnect()              { _tlStartSession(); }
+function traceDisconnect()           { _tlStopSession(); }
+
+function traceUserSpeaking() {
+  _tlCloseSeg('input');
+  _tlOpenSeg('input', 'listening...');
+  _tracePlayingEmitted = false;
+}
+
+function traceTranscript(text) {
+  const seg = _tlActive['input'];
+  if (seg) {
+    seg.label = text ? '"' + text.slice(0, 32) + '"' : 'transcript';
+  } else {
+    // user_speaking_start may not have arrived yet — open now
+    _tlOpenSeg('input', text ? '"' + text.slice(0, 32) + '"' : 'transcript');
+  }
+  // INPUT stays open until traceLlmStart closes it
+}
+
+function traceSkill(name) {
+  _tlCloseSeg('llm');
+}
+
+function traceLlmStart() {
+  _tlCloseSeg('input');  // user finished speaking, bot now thinking
+  _tlCloseSeg('llm');
+  _tlOpenSeg('llm', 'generating');
+  _tracePlayingEmitted = false;
+}
+
+function traceLlmChunk() { /* bar extends automatically via open segment */ }
+
+function traceTtsStart() {
+  _tlCloseSeg('llm');
+  _tlCloseSeg('tts');
+  _tlOpenSeg('tts', 'playing');
+}
+
+function traceTurnDone() {
+  Object.keys(_tlActive).forEach(_tlCloseSeg);
+  _tlTurns.push(_tlNow());
+  _tracePlayingEmitted = false;
+}
+
+function traceInterrupt() {
+  Object.keys(_tlActive).forEach(_tlCloseSeg);
+  _tlBargeIns.push(_tlNow());
+  _tracePlayingEmitted = false;
+}
+
+// Optional: map raw tool/action names → friendly labels for the API lane of the
+// pipeline timeline. Unmapped tools fall back to their raw name. Edit to taste.
+const _TOOL_LABELS = {
+  // customer_lookup: 'lookup customer',
+  // get_orders:      'get orders',
+};
+
+function traceToolCall(tool, status) {
+  const label = _TOOL_LABELS[tool] || tool;
+  if (status === 'start') {
+    _tlCloseSeg('api');
+    _tlOpenSeg('api', label);
+  } else {
+    _tlCloseSeg('api');
+  }
+}
+
+// ── Timeline scroll / drag interaction ───────
+(function () {
+  let dragX = null;
+
+  _tlCanvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    // deltaX: horizontal trackpad swipe; deltaY: mouse wheel / vertical swipe
+    const delta = (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY);
+    _tlViewOffset = Math.max(0, _tlViewOffset + delta / _TL_PX_PER_S);
+  }, { passive: false });
+
+  _tlCanvas.addEventListener('pointerdown', e => {
+    dragX = e.clientX;
+    _tlCanvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  _tlCanvas.addEventListener('pointermove', e => {
+    if (dragX === null) return;
+    const dx = e.clientX - dragX;
+    dragX = e.clientX;
+    _tlViewOffset = Math.max(0, _tlViewOffset - dx / _TL_PX_PER_S);
+  });
+
+  _tlCanvas.addEventListener('pointerup', e => {
+    // Click (no drag) on the LIVE badge jumps back to live
+    if (dragX !== null && Math.abs(e.clientX - dragX) < 4) {
+      const rect = _tlCanvas.getBoundingClientRect();
+      const lx = (e.clientX - rect.left) / rect.width * _tlW;
+      if (lx > _tlW - 80) _tlViewOffset = 0;
+    }
+    dragX = null;
+  });
+
+  _tlCanvas.addEventListener('pointercancel', () => { dragX = null; });
+}());
+
+// Kick off an idle draw loop immediately so the canvas isn't blank
+_tlResize();
+_tlDraw();
+new ResizeObserver(_tlResize).observe(_tlCanvas);
+
+// ─────────────────────────────────────────────
+// Drag-to-resize handle
+(function () {
+  const handle   = document.getElementById('dbg-resize');
+  let dragging   = false;
+  let startY     = 0;
+  let startH     = 0;
+
+  handle.addEventListener('pointerdown', e => {
+    dragging = true;
+    startY   = e.clientY;
+    startH   = _dbgPanel.offsetHeight;
+    handle.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  handle.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const delta  = startY - e.clientY;          // drag up = positive = taller
+    const newH   = Math.min(
+      window.innerHeight * 0.9,
+      Math.max(80, startH + delta)
+    );
+    _dbgPanel.style.height = newH + 'px';
+    if (document.body.classList.contains('debug-open')) {
+      document.body.style.paddingBottom = newH + 'px';
+    }
+    _tlResize();
+  });
+
+  handle.addEventListener('pointerup',    () => { dragging = false; });
+  handle.addEventListener('pointercancel', () => { dragging = false; });
+}());
+</script>
+</body>
+</html>

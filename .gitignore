@@ -1,0 +1,27 @@
+# ── OS / editor ──────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# ── Python (channel/ ships .py) ──────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── Rasa voice channel runtime artifacts ─────
+recordings/          # WebSocketsInputChannel writes captured audio here when recording is enabled
+*.wav
+
+# ── Local secrets / env ──────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Misc ─────────────────────────────────────
+.playwright-mcp/
+*.log
