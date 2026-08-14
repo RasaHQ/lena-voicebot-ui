@@ -122,7 +122,13 @@ Configurable via URL query parameters — no file editing needed:
 | `ws`       | —                | Full WebSocket URL. Overrides `host`/`port`/`channel` when set.    |
 | `title`    | `Voice Assistant`| Text shown above the orb.                                          |
 | `lang`     | `en-US`          | Language key sent on connect; must match a `language_map` entry.   |
-| `rate`     | `48000`          | Audio sample rate; match your bot's channel `sample_rate`.         |
+| `rate`     | `48000`          | Audio sample rate; must be `48000` or `24000` — see note below.    |
+
+> **Sample rate note:** The orb decodes bot audio as Linear-16 PCM. The channel
+> selects the matching format automatically (`L16_48KHZ` at 48 kHz,
+> `L16_24KHZ` at 24 kHz). `?rate=8000` would select `MULAW_8KHZ`, which the
+> browser cannot decode — audio would be unintelligible. Stick to 48 kHz
+> (default) or 24 kHz.
 
 Examples:
 
@@ -192,7 +198,7 @@ The orb speaks the custom `websockets` wire protocol over one WebSocket:
 | Mic permission never prompts         | Serve over `http://localhost` (step 4), not a bare `file://` path.                  |
 | Transcript/skill labels never appear | Those come from the custom channel — make sure you're on `/webhooks/websockets/`, not the built-in `browser_audio`. |
 | API lane in timeline stays empty     | Expected unless you wire up `trace_utils.py` (see above).                           |
-| Bot audio garbled / chipmunky        | Bot channel `sample_rate` ≠ orb rate. Check the console warning; reconnect with `?rate=<value>`. |
+| Bot audio garbled / chipmunky        | Bot channel `sample_rate` ≠ orb `rate`. Check the console warning; reconnect with `?rate=<value>`. Only `48000` and `24000` are valid for the orb — see the sample rate note in Configuration above. |
 | `TypeError` / channel init failure   | Confirm you are on Rasa Pro **3.17+** and using this branch's `websockets.py`. |
 | Language ignored / ASR wrong language | Orb `lang` is not a key in ASR/TTS `language_map`. Align `lang`, `config.yml`, and credentials. |
 | Barge-in never fires                 | Set `interruptions.enabled: true` (and optionally `min_words`) in the channel credentials. |
