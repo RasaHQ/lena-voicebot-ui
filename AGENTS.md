@@ -116,7 +116,8 @@ The orb reads URL query params; override without editing `orb.html`:
 | Param | Default | Notes |
 | ----- | ------- | ----- |
 | `host` / `port` | page host / `5005` | Rasa server location. |
-| `ws` | — | Full WS URL; overrides host/port/channel. Use for TLS/remote: `wss://…`. |
+| `projectUrl` | — | Bot base URL **including reverse-proxy path prefix**; overrides host/port. Relative (`.`, `/prefix`) or absolute. Same name/meaning as Inspector's `projectUrl`. Behind a proxy, `?projectUrl=.` is the right answer — the default `:5005` will be wrong. |
+| `ws` | — | Full WS URL; overrides projectUrl/host/port/channel. Use for TLS/remote: `wss://…`. |
 | `channel` | `websockets` | The path segment; leave as-is for this channel. |
 | `title` | `Voice Assistant` | Heading above the orb. |
 | `lang` | `en-US` | Sent to the bot on connect; must match a `language_map` key. |
@@ -133,6 +134,7 @@ To change defaults permanently, edit the `CONFIG` block at the top of the
 | `TypeError` on `VoiceInputChannel.__init__` / blueprint | Bot is older than 3.17, or a stale pre-3.17 copy of `websockets.py` is installed. |
 | "WS error — is the bot running?" | Bot down, wrong port, or channel not registered. Re-check step 3. |
 | Mic never prompts | Page served from `file://`. Serve over `http://localhost`. |
+| WS URL wrongly contains `:5005` | Reverse-proxy deployment. Pass `?projectUrl=.` so the orb reuses the page's origin and path prefix. |
 | Connects but bot never replies | Missing/invalid ASR or TTS API key. Check bot logs. |
 | Transcript/skill labels never appear | You're pointed at `browser_audio`, not `websockets`. Those events only come from this custom channel. |
 | Bot audio garbled / chipmunky | `rate` ≠ bot channel `sample_rate`. Match them (console logs a warning). |

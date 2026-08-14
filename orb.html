@@ -429,6 +429,13 @@
 //    orb.html?host=localhost&port=5005
 //    orb.html?ws=ws://192.168.1.50:5005/webhooks/websockets/websocket
 //    orb.html?title=Acme%20Support
+//
+//  Behind a reverse proxy (Kubernetes ingress, nginx, etc.) the bot is not on
+//  a separate :5005 — it is served on the page's own port under a path prefix.
+//  Use `projectUrl` for that (same name as Rasa Inspector):
+//    orb.html?projectUrl=.                          → same origin + same directory
+//    orb.html?projectUrl=/my-prefix                 → same origin, explicit prefix
+//    orb.html?projectUrl=https://host/my-prefix     → different origin + prefix
 // ═══════════════════════════════════════════════════════════════════════════
 
 const params = new URLSearchParams(location.search);
@@ -437,6 +444,11 @@ const CONFIG = {
   host:     params.get('host') || location.hostname || 'localhost',
   port:     params.get('port') || '5005',
   channel:  params.get('channel') || 'websockets',
+  // Base HTTP(S) URL of the Rasa server, including any reverse-proxy path
+  // prefix. Same meaning as Inspector's projectUrl. May be relative to this
+  // page ('.', '/prefix') or absolute. Takes precedence over host/port;
+  // overridden by `ws`.
+  projectUrl: params.get('projectUrl') || null,
   ws:       params.get('ws') || null,
   title:    params.get('title') || 'Voice Assistant',
   language: params.get('lang') || 'en-US',
@@ -445,8 +457,20 @@ const CONFIG = {
 
 function buildWsUrl() {
   if (CONFIG.ws) return CONFIG.ws;
+
+  const path = `/webhooks/${CONFIG.channel}/websocket`;
+
+  if (CONFIG.projectUrl) {
+    // Resolving against location.href lets projectUrl be relative ('.', '/prefix')
+    // or absolute, and keeps the proxy's port (in .host) instead of forcing 5005.
+    const base   = new URL(CONFIG.projectUrl, location.href);
+    const scheme = base.protocol === 'https:' ? 'wss:' : 'ws:';
+    const prefix = base.pathname.replace(/\/$/, ''); // avoid a doubled slash
+    return `${scheme}//${base.host}${prefix}${path}`;
+  }
+
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${scheme}//${CONFIG.host}:${CONFIG.port}/webhooks/${CONFIG.channel}/websocket`;
+  return `${scheme}//${CONFIG.host}:${CONFIG.port}${path}`;
 }
 
 document.title = CONFIG.title;

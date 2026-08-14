@@ -119,7 +119,8 @@ Configurable via URL query parameters — no file editing needed:
 | `host`     | page's hostname  | Rasa server host.                                                  |
 | `port`     | `5005`           | Rasa server port.                                                  |
 | `channel`  | `websockets`     | Voice channel name in the WebSocket path.                          |
-| `ws`       | —                | Full WebSocket URL. Overrides `host`/`port`/`channel` when set.    |
+| `projectUrl` | —              | Base URL of the bot **including any reverse-proxy path prefix**. Same as Inspector's `projectUrl`. Overrides `host`/`port`. See below. |
+| `ws`       | —                | Full WebSocket URL. Overrides `projectUrl`/`host`/`port`/`channel` when set. |
 | `title`    | `Voice Assistant`| Text shown above the orb.                                          |
 | `lang`     | `en-US`          | Language key sent on connect; must match a `language_map` entry.   |
 | `rate`     | `48000`          | Audio sample rate; must be `48000` or `24000` — see note below.    |
@@ -140,6 +141,41 @@ orb.html?ws=wss://voice.example.com/webhooks/websockets/websocket
 
 To change defaults permanently, edit the `CONFIG` block near the top of the
 `<script>` in `orb.html`.
+
+### Running behind a reverse proxy (path prefix)
+
+By default the orb targets **port 5005 on the page's hostname**, which is right
+for local development but wrong on hosting platforms (Kubernetes ingress,
+nginx, etc.) where the bot is reached on the page's *own* port under a
+**path prefix** — there is no separate `:5005`. Symptom:
+
+```
+WebSocket connection to 'wss://my-host.example.com:5005/webhooks/websockets/websocket' failed
+```
+
+Use `projectUrl` for this — same name and meaning as Rasa Inspector. It is the
+bot's base URL, prefix included. It may be relative to the page or absolute.
+
+| Value                                        | Resulting WebSocket URL                                     |
+| -------------------------------------------- | ----------------------------------------------------------- |
+| `?projectUrl=.`                              | same origin + same directory as `orb.html` — usually correct |
+| `?projectUrl=/my-prefix`                     | `wss://<page-host>/my-prefix/webhooks/websockets/websocket`  |
+| `?projectUrl=https://my-host/my-prefix`      | `wss://my-host/my-prefix/webhooks/websockets/websocket`      |
+
+`?projectUrl=.` is the one to try first: it reuses the page's scheme, host, port,
+and directory, so it works on any path-prefix proxy without knowing the prefix.
+
+Two things to confirm on the hosting side:
+
+1. The **Rasa server is proxied under the same prefix** that serves `orb.html`.
+   If the bot sits on a different route, pass that route explicitly
+   (`?projectUrl=/bot-route`) or give the full URL with `?ws=`.
+2. The proxy **forwards WebSocket upgrades** (the `Upgrade` and `Connection`
+   headers). If the URL is right but the socket still fails to open, this is
+   usually the cause.
+
+Open the **Debug** panel and use **Download** to check the exact URL the orb
+used — it is printed as `WS URL` at the top of the report.
 
 ---
 
@@ -194,6 +230,7 @@ The orb speaks the custom `websockets` wire protocol over one WebSocket:
 | Symptom                              | Fix                                                                                 |
 | ------------------------------------ | ----------------------------------------------------------------------------------- |
 | "WS error — is the bot running?"     | Confirm the bot is up and `channels.websockets.WebSocketsInputChannel` is in `credentials.yml`. |
+| WS URL has a wrong `:5005` / wrong path | You're behind a reverse proxy. Add `?projectUrl=.` (see "Running behind a reverse proxy" above). |
 | `ModuleNotFoundError` on bot start   | The dotted path in `credentials.yml` must match where you put `websockets.py`.      |
 | Mic permission never prompts         | Serve over `http://localhost` (step 4), not a bare `file://` path.                  |
 | Transcript/skill labels never appear | Those come from the custom channel — make sure you're on `/webhooks/websockets/`, not the built-in `browser_audio`. |
