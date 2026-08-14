@@ -5,6 +5,10 @@ Instructions for an agent (or developer) integrating this voice orb into an
 walkthrough is in [`README.md`](./README.md); this file is the operational
 checklist plus the gotchas that actually break integrations.
 
+**Target runtime: Rasa Pro 3.17+.** The channel in `channels/websockets.py` uses
+the 3.17 `VoiceInputChannel` API. Do not drop this file into a pre-3.17 bot
+without adapting it.
+
 ## What this repo is
 
 A self-contained voice UI ("the orb") plus the Rasa voice channel it needs:
@@ -55,6 +59,20 @@ Do these in the **target bot's** repository, not this one.
    deepgram, azure, cartesia, rime. AudioCodes is a *channel*, not a pluggable
    ASR/TTS engine — it cannot be named here.
 
+   **`language_map` is required (3.17).** Keys must match `language` /
+   `additional_languages` in the bot's `config.yml`. The orb sends `lang` on
+   connect; that value must be one of those keys (not a free-form vendor code
+   unless that is also how the bot is configured).
+
+   **Barge-in uses `interruptions:`**, not a custom `cfm:` block:
+   ```yaml
+   interruptions:
+     enabled: true
+     min_words: 3
+   ```
+   Same shape as Inspector and other Rasa voice channels. Unknown extra keys in
+   the credentials block are ignored so older configs still load.
+
 3. **Start the bot** and confirm the channel registered:
    ```bash
    rasa run --enable-api
@@ -101,7 +119,7 @@ The orb reads URL query params; override without editing `orb.html`:
 | `ws` | — | Full WS URL; overrides host/port/channel. Use for TLS/remote: `wss://…`. |
 | `channel` | `websockets` | The path segment; leave as-is for this channel. |
 | `title` | `Voice Assistant` | Heading above the orb. |
-| `lang` | `en-US` | Sent to the bot on connect. |
+| `lang` | `en-US` | Sent to the bot on connect; must match a `language_map` key. |
 | `rate` | `48000` | Must equal the bot channel's `sample_rate`. |
 
 To change defaults permanently, edit the `CONFIG` block at the top of the
@@ -112,11 +130,14 @@ To change defaults permanently, edit the `CONFIG` block at the top of the
 | Symptom | Cause / fix |
 | ------- | ----------- |
 | `ModuleNotFoundError` on bot start | Dotted path in `credentials.yml` ≠ where `websockets.py` lives, or missing `channels/__init__.py`. |
+| `TypeError` on `VoiceInputChannel.__init__` / blueprint | Bot is older than 3.17, or a stale pre-3.17 copy of `websockets.py` is installed. |
 | "WS error — is the bot running?" | Bot down, wrong port, or channel not registered. Re-check step 3. |
 | Mic never prompts | Page served from `file://`. Serve over `http://localhost`. |
 | Connects but bot never replies | Missing/invalid ASR or TTS API key. Check bot logs. |
 | Transcript/skill labels never appear | You're pointed at `browser_audio`, not `websockets`. Those events only come from this custom channel. |
 | Bot audio garbled / chipmunky | `rate` ≠ bot channel `sample_rate`. Match them (console logs a warning). |
+| Wrong ASR/TTS language | Orb `lang` is not a key in credentials `language_map`. Align with `config.yml`. |
+| Barge-in never fires | `interruptions.enabled` is false/missing. Use the standard interruptions block. |
 | API lane of timeline stays empty | Expected. It only fills if bot actions call `trace_utils.post_tool_trace` (see below). |
 
 ## Optional: the API / tool-call timeline lane
@@ -144,6 +165,8 @@ Everything else in the UI works without this.
   documented in `README.md` under "How it connects".
 - **Don't swap to `browser_audio`** to reduce setup; it drops transcript/skill/
   trace. That trade-off was already decided.
+- **Don't invent CFM/barge-in config** beyond `interruptions:` — that is the
+  supported 3.17 mechanism.
 - The **Rasa logo** (inline SVG in `orb.html`, top-right) and the **color
   palette** (`COLORS` / `GLOW_CSS` objects; the look is driven by the GLSL
   `FRAG` shader) are safe to rebrand. The tool-label map (`_TOOL_LABELS`) is

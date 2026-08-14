@@ -19,6 +19,9 @@ channel** (included in `channels/`) that streams the extra events the transcript
 and debug panels need. That means the customer copies one Python file into their
 bot and registers it in `credentials.yml`.
 
+**Requires Rasa Pro 3.17+.** The channel uses the 3.17 `VoiceInputChannel` API
+(`conversation_blueprint`, `language_map`, conversation-queue ASR events).
+
 ## What you get
 
 - **Animated WebGL orb** driven by live mic/bot audio levels.
@@ -72,6 +75,14 @@ that provider's API key. The Deepgram config in the file is only an example;
 Azure and others work too (installed engines: ASR = deepgram, azure; TTS =
 deepgram, azure, cartesia, rime).
 
+**Use `language_map` for ASR/TTS** (Rasa Pro 3.17). Keys must match your bot's
+`language` / `additional_languages` in `config.yml` (e.g. `en` or `en-US`).
+The orb's `lang` query param must be one of those keys.
+
+**Barge-in** uses the standard `interruptions:` block (`enabled`, `min_words`) —
+same as Inspector and other voice channels. Do not add a `cfm:` block; it is
+not part of the 3.17 channel API.
+
 ### 3. Run your bot
 
 ```bash
@@ -110,7 +121,7 @@ Configurable via URL query parameters — no file editing needed:
 | `channel`  | `websockets`     | Voice channel name in the WebSocket path.                          |
 | `ws`       | —                | Full WebSocket URL. Overrides `host`/`port`/`channel` when set.    |
 | `title`    | `Voice Assistant`| Text shown above the orb.                                          |
-| `lang`     | `en-US`          | Language hint sent to the bot.                                     |
+| `lang`     | `en-US`          | Language key sent on connect; must match a `language_map` entry.   |
 | `rate`     | `48000`          | Audio sample rate; match your bot's channel `sample_rate`.         |
 
 Examples:
@@ -182,6 +193,9 @@ The orb speaks the custom `websockets` wire protocol over one WebSocket:
 | Transcript/skill labels never appear | Those come from the custom channel — make sure you're on `/webhooks/websockets/`, not the built-in `browser_audio`. |
 | API lane in timeline stays empty     | Expected unless you wire up `trace_utils.py` (see above).                           |
 | Bot audio garbled / chipmunky        | Bot channel `sample_rate` ≠ orb rate. Check the console warning; reconnect with `?rate=<value>`. |
+| `TypeError` / channel init failure   | Confirm you are on Rasa Pro **3.17+** and using this branch's `websockets.py`. |
+| Language ignored / ASR wrong language | Orb `lang` is not a key in ASR/TTS `language_map`. Align `lang`, `config.yml`, and credentials. |
+| Barge-in never fires                 | Set `interruptions.enabled: true` (and optionally `min_words`) in the channel credentials. |
 
 ---
 
