@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import copy
 import json
 import os
 import uuid
 import wave
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional
 from sanic.exceptions import WebsocketClosed
 import structlog
 from sanic import (
@@ -21,20 +20,20 @@ from sanic import (
     response,
 )
 
-from rasa.core.channels import UserMessage
-from rasa.core.channels.voice_stream.asr.asr_engine import ASREngine
+from rasa.core.channels.channel import RuntimeAgent
 from rasa.core.channels.voice_stream.asr.asr_event import (
     ASREvent,
     NewTranscript,
-    UserIsSpeaking,
 )
 from rasa.core.channels.voice_stream.audio_bytes import RasaAudioBytes
-from rasa.core.channels.voice_stream.call_state import call_state, CallState, _call_state
+from rasa.core.channels.voice_stream.call_state import call_state
 from rasa.core.channels.voice_stream.tts.tts_engine import TTSEngine
 from rasa.core.channels.voice_stream.util import repack_voice_credentials
 from rasa.core.channels.voice_stream.voice_channel import (
     ContinueConversationAction,
     EndConversationAction,
+    MarkerInput,
+    MarkerMessageOutput,
     NewAudioAction,
     VoiceChannelAction,
     VoiceInputChannel,
@@ -42,6 +41,10 @@ from rasa.core.channels.voice_stream.voice_channel import (
     asr_engine_from_config,
     tts_engine_from_config,
 )
+
+if TYPE_CHECKING:
+    from rasa.core.channels.conversation_queue.queue import ConversationQueue
+    from rasa.engine.storage.storage import ModelMetadata
 
 logger = structlog.get_logger()
 
@@ -210,7 +213,7 @@ class WebsocketsOutputChannel(VoiceOutputChannel):
             "audio": base64.b64encode(channel_bytes).decode("utf-8")
         })
 
-    async def send_end_marker(self, recipient_id: str) -> None:
+    async def send_end_marker(self, marker_input: MarkerInput) -> None:
         """Tag the next marker as final before delegating to the base class.
 
         The base class send_end_marker calls create_marker_message then sends it.
@@ -220,19 +223,35 @@ class WebsocketsOutputChannel(VoiceOutputChannel):
         the pre-buffered audio is still playing.
         """
         self._next_marker_is_end = True
-        await super().send_end_marker(recipient_id)
+        await super().send_end_marker(marker_input)
 
-    def create_marker_message(self, recipient_id: str) -> Tuple[str, str]:
+    async def _send_marker_message_via_websocket(
+        self, mark_id: str, marker_message: str
+    ) -> None:
+        """Send the marker and record it on call_state for the input channel.
+
+        map_input_message (on WebSocketsInputChannel) needs to know the most
+        recently sent marker id to detect when the browser has finished
+        playing the bot's audio, but it has no direct reference to this output
+        channel instance — so the id is mirrored onto the shared call_state.
+        """
+        await super()._send_marker_message_via_websocket(mark_id, marker_message)
+        call_state.latest_bot_audio_id = mark_id
+
+    def create_marker_message(self, marker_input: MarkerInput) -> MarkerMessageOutput:
         """Create a marker message to signal audio boundaries and include latency metrics."""
         message_id = uuid.uuid4().hex
         marker_data = {"marker": message_id}
 
-        # Include comprehensive latency information if available
+        # Include comprehensive latency information if available. Field names
+        # here match CallState's actual attributes (rasa_processing_latency_ms,
+        # tts_first_byte_latency_ms, tts_complete_latency_ms) — do not rename
+        # without also updating the orb's expected JSON payload.
         latency_data = {
             "asr_latency_ms": call_state.asr_latency_ms,
-            "response_generation_latency_ms": call_state.response_generation_latency_ms,
-            "tts_first_byte_latency_ms": call_state.response_tts_first_byte_latency_ms,
-            "tts_complete_latency_ms": call_state.tts_latency_ms,
+            "response_generation_latency_ms": call_state.rasa_processing_latency_ms,
+            "tts_first_byte_latency_ms": call_state.tts_first_byte_latency_ms,
+            "tts_complete_latency_ms": call_state.tts_complete_latency_ms,
         }
 
         # Filter out None values from latency data
@@ -249,7 +268,7 @@ class WebsocketsOutputChannel(VoiceOutputChannel):
             marker_data["final"] = True
             self._next_marker_is_end = False
 
-        return json.dumps(marker_data), message_id
+        return MarkerMessageOutput(message_id=message_id, message=json.dumps(marker_data))
 
 class WebSocketsInputChannel(VoiceInputChannel):
     """Input channel for receiving audio from browser clients over WebSocket.
@@ -284,15 +303,28 @@ class WebSocketsInputChannel(VoiceInputChannel):
             tts_config: Configuration dictionary for TTS engine
             recording: Whether to record user audio for debugging
             interruptions: Configuration for handling user interruptions
-            cfm: Optional CFM configuration (barge-in, filler, turn detection)
+            cfm: Legacy configuration accepted for backward compatibility.
+                Rasa Pro 3.17 does not support it on VoiceInputChannel; use
+                ``interruptions`` for barge-in.
         """
-        super().__init__(server_url, asr_config, tts_config, interruptions, cfm)
+        super().__init__(server_url, asr_config, tts_config, interruptions)
 
+        if cfm:
+            logger.warning(
+                "websockets.cfm_config_ignored",
+                reason=(
+                    "Rasa Pro 3.17 does not support cfm on VoiceInputChannel; "
+                    "configure barge-in with interruptions instead."
+                ),
+            )
         self._recording_enabled = recording
         self._wav_file: Optional[wave.Wave_write] = None
         self._sample_rate = 16000  # Default sample rate, can be overridden by client
         self._is_user_speaking = False  # Track user speech state
         self._channel_websocket: Optional[Websocket] = None  # Store websocket for hangup signal
+        # Resolved by collect_call_parameters(); overwritten with a key that
+        # actually exists in the ASR/TTS `language_map` (credentials.yml).
+        self.language: str = "en"
 
     def _start_recording(self, call_id: str, user_id: str, sample_rate: int = 16000) -> None:
         """Start recording user audio to a WAV file for debugging.
@@ -352,15 +384,21 @@ class WebSocketsInputChannel(VoiceInputChannel):
         """Collect call parameters from the WebSocket connection.
 
         Waits for the initial JSON message from the browser containing
-        ``sample_rate`` and ``language``, then merges those values into the
-        ASR/TTS configs and sets ``self.audio_format`` so that
-        ``_get_asr_and_tts_engines`` (called by the base-class
-        ``run_audio_streaming``) picks up the correct runtime values.
+        ``sample_rate`` and ``language``, resolves ``language`` to a key
+        configured in the ASR/TTS ``language_map`` (falling back to the
+        bot's default language if the client asked for something unsupported),
+        and sets ``self.audio_format`` so that ``_get_asr_and_tts_engines``
+        (called by the base-class ``run_audio_streaming``) picks up the
+        correct runtime values.
         """
         from rasa.core.channels.voice_stream.browser_audio import _SAMPLE_RATE_TO_FORMAT
 
+        self._channel_websocket = channel_websocket
+
         sample_rate = 48000
-        language = "en-US"
+        # call_state.current_language was just seeded from the model's default
+        # language by _initialize_call_state(), so it's the right fallback here.
+        requested_language = call_state.current_language
 
         try:
             init_message = await asyncio.wait_for(
@@ -368,36 +406,31 @@ class WebSocketsInputChannel(VoiceInputChannel):
             )
             init_data = json.loads(init_message)
             sample_rate = init_data.get("sample_rate", sample_rate)
-            language = init_data.get("language", language)
+            requested_language = init_data.get("language", requested_language)
         except asyncio.TimeoutError:
             logger.warning("websockets.call_parameters_timeout — using defaults")
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning("websockets.call_parameters_parse_error", error=str(e))
 
         call_id = f"WebSockets-{uuid.uuid4()}"
-        logger.info(
-            "websockets.call_parameters_collected",
-            call_id=call_id,
-            sample_rate=sample_rate,
-            language=language,
-        )
 
         # Update audio format so _get_asr_and_tts_engines uses the right format.
         self.audio_format = _SAMPLE_RATE_TO_FORMAT.get(
             sample_rate, _SAMPLE_RATE_TO_FORMAT[48000]
         )
 
-        # Merge language into ASR config (skip if language_map is present —
-        # Deepgram rejects both fields simultaneously).
-        self._merged_asr_config = copy.deepcopy(self.asr_config)
-        if language and "language_map" not in self._merged_asr_config:
-            self._merged_asr_config["language"] = language
-
-        self._merged_tts_config = copy.deepcopy(self.tts_config)
-        if language and "language_map" not in self._merged_tts_config:
-            self._merged_tts_config["language"] = language
-
+        self.language = self._resolve_language_key(requested_language)
         self._sample_rate = sample_rate
+
+        logger.info(
+            "websockets.call_parameters_collected",
+            call_id=call_id,
+            sample_rate=sample_rate,
+            requested_language=requested_language,
+            resolved_language=self.language,
+        )
+
+        self._start_recording(call_id, "browser", sample_rate)
 
         return CallParameters(
             call_id=call_id,
@@ -405,24 +438,54 @@ class WebSocketsInputChannel(VoiceInputChannel):
             bot_phone="rasa",
             stream_id=call_id,
             sample_rate=sample_rate,
-            language=language,
+            language=self.language,
         )
 
-    def _get_asr_and_tts_engines(self):
-        """Create ASR/TTS engines using configs merged with client call parameters."""
-        asr_config = getattr(self, "_merged_asr_config", self.asr_config)
-        tts_config = getattr(self, "_merged_tts_config", self.tts_config)
+    def _resolve_language_key(self, requested_language: Optional[str]) -> str:
+        """Resolve the client-requested language to a configured language_map key.
+
+        ``language_map`` in credentials.yml is keyed by whatever value the
+        bot's config.yml uses for ``language``/``additional_languages`` (e.g.
+        "en", or "en-US" if that's what the assistant is configured with) —
+        not necessarily a vendor-specific ASR/TTS code. If the client's
+        requested language isn't a configured key, fall back to the bot's
+        default language so engine construction doesn't fail.
+        """
+        supported = set(self.asr_config.get("language_map") or {}) | set(
+            self.tts_config.get("language_map") or {}
+        )
+        if requested_language and (not supported or requested_language in supported):
+            return requested_language
+
+        fallback = call_state.current_language
+        logger.warning(
+            "websockets.language_not_in_language_map",
+            requested=requested_language,
+            supported=sorted(supported),
+            fallback=fallback,
+        )
+        return fallback
+
+    def _get_asr_and_tts_engines(self, model_metadata: Optional["ModelMetadata"]):
+        """Create ASR/TTS engines for the resolved call language.
+
+        Signature must match VoiceInputChannel._get_asr_and_tts_engines since
+        the base class's run_audio_streaming calls it with model_metadata.
+        """
+        additional_languages = (
+            model_metadata.additional_languages if model_metadata else None
+        )
         asr_engine = asr_engine_from_config(
-            asr_config=asr_config,
+            asr_config=self.asr_config,
             format=self.audio_format,
             language=self.language,
-            additional_languages=self.additional_languages,
+            additional_languages=additional_languages,
         )
         tts_engine = tts_engine_from_config(
-            tts_config=tts_config,
+            tts_config=self.tts_config,
             format=self.audio_format,
             language=self.language,
-            additional_languages=self.additional_languages,
+            additional_languages=additional_languages,
         )
         return asr_engine, tts_engine
 
@@ -450,35 +513,34 @@ class WebSocketsInputChannel(VoiceInputChannel):
 
     async def handle_asr_event(
         self,
-        e: ASREvent,
-        voice_websocket: Websocket,
-        on_new_message: Callable[[UserMessage], Awaitable[Any]],
-        tts_engine: TTSEngine,
+        asr_event: ASREvent,
+        input_queue: "ConversationQueue",
         call_parameters: CallParameters,
-        asr_engine: ASREngine,  # ← required by base class signature as of latest version
     ) -> None:
-        """Handle ASR events and ensure interrupt_playback is called for this channel.
+        """Trace final transcripts to the browser, then delegate to the base handler.
 
-        Rasa 3.15.10 moved the interruption check; we explicitly trigger
-        interrupt_playback here so interruptions keep working in websockets.
-        The asr_engine parameter is forwarded to super() so language-change
-        detection (ASR language switching) continues to work.
+        Interruption handling (should_interrupt / interrupt_playback /
+        BargeInInputEvent) already happens generically in the base class's
+        receive_asr_events before this is ever called, so this override only
+        adds the transcript trace event for the browser's trace panel — the
+        replacement for the old (now-removed) _dispatch_voice_agent hook.
         """
-        if isinstance(e, UserIsSpeaking) and self.should_interrupt(e):
-            await self.interrupt_playback(voice_websocket, call_parameters)
-        elif (
-            isinstance(e, NewTranscript)
-            and e.text
-            and call_state.is_bot_speaking
-            and self.interruption_config.enabled
-        ):
-            await self.interrupt_playback(voice_websocket, call_parameters)
+        if isinstance(asr_event, NewTranscript) and asr_event.text:
+            await self._send_trace_event({"trace_event": "user_speaking_start"})
+            await self._send_trace_event(
+                {"trace_event": "transcript", "text": asr_event.text}
+            )
 
-        # Forward to base class — this handles NewTranscript → on_new_message,
-        # UserIsSpeaking state, UserSilence, and ASR language updates.
-        await super().handle_asr_event(
-            e, voice_websocket, on_new_message, tts_engine, call_parameters, asr_engine
-        )
+        await super().handle_asr_event(asr_event, input_queue, call_parameters)
+
+    async def _send_trace_event(self, payload: Dict[str, Any]) -> None:
+        """Best-effort send of a trace payload to the connected browser."""
+        if self._channel_websocket is None:
+            return
+        try:
+            await self._channel_websocket.send(json.dumps(payload))
+        except (WebsocketClosed, Exception) as e:
+            logger.debug("websockets.trace_event_send_skipped", error=str(e))
 
     async def map_input_message(
         self,
@@ -532,19 +594,20 @@ class WebSocketsInputChannel(VoiceInputChannel):
 
         elif "marker" in data:
             received_marker = data["marker"]
+            latest_bot_audio_id = getattr(call_state, "latest_bot_audio_id", None)
             # Browser is acknowledging received audio marker
-            if received_marker == call_state.latest_bot_audio_id:
+            if latest_bot_audio_id is not None and received_marker == latest_bot_audio_id:
                 # Browser finished streaming the last audio bytes
                 call_state.is_bot_speaking = False
                 logger.debug(
                     "websockets.audio_playback_complete",
-                    marker=call_state.latest_bot_audio_id,
+                    marker=latest_bot_audio_id,
                 )
 
                 if call_state.should_hangup:
                     logger.debug(
                         "websockets.hangup_requested",
-                        marker=call_state.latest_bot_audio_id,
+                        marker=latest_bot_audio_id,
                     )
                     await ws.send(json.dumps({"hangup": True}))
                     return EndConversationAction()
@@ -613,50 +676,29 @@ class WebSocketsInputChannel(VoiceInputChannel):
             min_delay_between_bot_messages_seconds=0.2,
         )
 
-    async def _dispatch_voice_agent(
+    def conversation_blueprint(
         self,
-        message: "UserMessage",
-        output_channel: "VoiceOutputChannel",
-        sender_id: str,
-    ) -> None:
-        """Send transcript trace via output_channel before dispatching to the voice agent.
-
-        CFM mode bypasses handle_asr_event entirely, so this is the only reliable
-        hook for capturing the user's transcript and sending it to the browser trace panel.
-        The output_channel.voice_websocket is the same WebSocket that sends response_chunk
-        and marker messages, so it is known-good for browser delivery.
-        """
-        if message.text:
-            try:
-                await output_channel.voice_websocket.send(json.dumps({
-                    "trace_event": "user_speaking_start",
-                }))
-                await output_channel.voice_websocket.send(json.dumps({
-                    "trace_event": "transcript",
-                    "text": message.text,
-                }))
-            except Exception:
-                pass
-        await super()._dispatch_voice_agent(message, output_channel, sender_id)
-
-    def blueprint(
-        self, on_new_message: Callable[[UserMessage], Awaitable[Any]]
+        agent: RuntimeAgent,
     ) -> Blueprint:
         """Create a Sanic blueprint for the voice channel endpoints.
-        
+
+        VoiceInputChannel registration tries conversation_blueprint(agent) before
+        falling back to blueprint(on_new_message); rasa-pro's built-in voice
+        channels (e.g. browser_audio) implement this one so run_audio_streaming
+        receives a real RuntimeAgent instead of a bare message callback.
+
         Provides:
         - GET /: Health check endpoint
-        - GET /web: Serve HTML form
         - WebSocket /websocket: Bidirectional audio streaming
-        
+        - POST /trace: Forward sub-agent tool-call trace events to the browser
+
         Args:
-            on_new_message: Callback for new user messages
-            
+            agent: Runtime agent used to drive the conversation for each call.
+
         Returns:
             Configured Sanic Blueprint
         """
         blueprint = Blueprint("websockets", __name__)
-        self._register_listeners(blueprint)
 
         @blueprint.route("/", methods=["GET"])
         async def health(_: Request) -> HTTPResponse:
@@ -672,7 +714,7 @@ class WebSocketsInputChannel(VoiceInputChannel):
                     "websockets.websocket_connection_opened",
                     client=request.ip,
                 )
-                await self.run_audio_streaming(on_new_message, ws, request)
+                await self.run_audio_streaming(agent, ws, request)
             except Exception as e:
                 logger.error(
                     "websockets.websocket_error",
