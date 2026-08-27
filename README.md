@@ -41,7 +41,6 @@ bot and registers it in `credentials.yml`.
 | `orb.html`                    | The entire UI. Open it in a browser.                               |
 | `vendor/ogl.umd.js`           | Vendored WebGL library so the orb works fully offline.             |
 | `channels/websockets.py`       | The custom Rasa voice channel. **Copy into your bot.**             |
-| `channels/deepgram_tts.py`     | Custom Deepgram TTS routing Aura to v1 and Flux to v2.             |
 | `channels/trace_utils.py`      | *Optional* helper so bot actions can feed the API/tool-call lane.  |
 | `credentials.websockets.yml`  | Paste-in channel config for your bot's `credentials.yml`.          |
 
@@ -55,12 +54,10 @@ Copy the channel file into your bot so it is importable, e.g.:
 
 ```bash
 cp channels/websockets.py  <your-bot>/channels/websockets.py
-cp channels/deepgram_tts.py <your-bot>/channels/deepgram_tts.py
 touch <your-bot>/channels/__init__.py      # if channels/ isn't already a package
 ```
 
-The Deepgram component uses the same dependencies and `DEEPGRAM_API_KEY` as
-Rasa Pro's built-in Deepgram TTS engine.
+It only depends on Rasa Pro and the standard library — no other files required.
 
 ### 2. Register it in credentials.yml
 
@@ -77,28 +74,6 @@ works. Copy your bot's existing `asr:` / `tts:` blocks (e.g. the ones under the
 that provider's API key. The Deepgram config in the file is only an example;
 Azure and others work too (installed engines: ASR = deepgram, azure; TTS =
 deepgram, azure, cartesia, rime).
-
-For a bot that mixes Deepgram Flux and Aura voices, select the custom engine by
-its dotted import path. A `flux-*` model automatically changes the configured
-`/v1/speak` path to `/v2/speak`; Aura models use `/v1/speak`. An optional
-per-language `endpoint` takes precedence when a proxy uses different routes:
-
-```yaml
-tts:
-  name: channels.deepgram_tts.EndpointAwareDeepgramTTS
-  endpoint: wss://proxy/Voicebot-deepgram/v1/speak
-  language_map:
-    en-GB:
-      language: en
-      model: flux-colin-en
-    fr-BE:
-      language: fr-fr
-      model: aura-2-agathe-fr
-    nl-BE:
-      language: nl-nl
-      model: aura-2-daphne-nl
-      # endpoint: wss://another-proxy/deepgram/v1/speak
-```
 
 **Use `language_map` for ASR/TTS** (Rasa Pro 3.17). Keys must match your bot's
 `language` / `additional_languages` in `config.yml` (e.g. `en` or `en-US`).
