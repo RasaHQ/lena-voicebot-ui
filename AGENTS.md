@@ -59,6 +59,12 @@ Do these in the **target bot's** repository, not this one.
    deepgram, azure, cartesia, rime. AudioCodes is a *channel*, not a pluggable
    ASR/TTS engine — it cannot be named here.
 
+   **`sample_rate` (same as Inspector).** Supported values: `8000`, `24000`,
+   `48000` (default). Sets the audio format for the whole call (mic, ASR, TTS,
+   playback). At `8000` the channel uses μ-law internally and converts to/from
+   Linear-16 for the browser. The orb `?rate=` query param **must match** this
+   value.
+
    **`language_map` is required (3.17).** Keys must match `language` /
    `additional_languages` in the bot's `config.yml`. The orb sends `lang` on
    connect; that value must be one of those keys (not a free-form vendor code
@@ -121,7 +127,7 @@ The orb reads URL query params; override without editing `orb.html`:
 | `channel` | `websockets` | The path segment; leave as-is for this channel. |
 | `title` | `Voice Assistant` | Heading above the orb. |
 | `lang` | `en-US` | Sent to the bot on connect; must match a `language_map` key. |
-| `rate` | `48000` | Must equal the bot channel's `sample_rate`. |
+| `rate` | `48000` | Must equal credentials `sample_rate` (`8000`, `24000`, or `48000`). |
 
 To change defaults permanently, edit the `CONFIG` block at the top of the
 `<script>` in `orb.html`.
@@ -137,7 +143,7 @@ To change defaults permanently, edit the `CONFIG` block at the top of the
 | WS URL wrongly contains `:5005` | Reverse-proxy deployment. Pass `?projectUrl=.` so the orb reuses the page's origin and path prefix. |
 | Connects but bot never replies | Missing/invalid ASR or TTS API key. Check bot logs. |
 | Transcript/skill labels never appear | You're pointed at `browser_audio`, not `websockets`. Those events only come from this custom channel. |
-| Bot audio garbled / chipmunky | `rate` ≠ bot channel `sample_rate`. Match them (console logs a warning). |
+| Bot audio garbled / chipmunky | Orb `?rate=` ≠ credentials `sample_rate`. Match them (channel logs a warning). |
 | Wrong ASR/TTS language | Orb `lang` is not a key in credentials `language_map`. Align with `config.yml`. |
 | Barge-in never fires | `interruptions.enabled` is false/missing. Use the standard interruptions block. |
 | API lane of timeline stays empty | Expected. It only fills if bot actions call `trace_utils.post_tool_trace` (see below). |

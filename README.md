@@ -41,6 +41,7 @@ bot and registers it in `credentials.yml`.
 | `orb.html`                    | The entire UI. Open it in a browser.                               |
 | `vendor/ogl.umd.js`           | Vendored WebGL library so the orb works fully offline.             |
 | `channels/websockets.py`       | The custom Rasa voice channel. **Copy into your bot.**             |
+| `channels/deepgram_tts.py`     | Custom Deepgram TTS routing Aura to v1 and Flux to v2.             |
 | `channels/trace_utils.py`      | *Optional* helper so bot actions can feed the API/tool-call lane.  |
 | `credentials.websockets.yml`  | Paste-in channel config for your bot's `credentials.yml`.          |
 
@@ -54,10 +55,12 @@ Copy the channel file into your bot so it is importable, e.g.:
 
 ```bash
 cp channels/websockets.py  <your-bot>/channels/websockets.py
+cp channels/deepgram_tts.py <your-bot>/channels/deepgram_tts.py
 touch <your-bot>/channels/__init__.py      # if channels/ isn't already a package
 ```
 
-It only depends on Rasa Pro and the standard library — no other files required.
+The Deepgram component uses the same dependencies and `DEEPGRAM_API_KEY` as
+Rasa Pro's built-in Deepgram TTS engine.
 
 ### 2. Register it in credentials.yml
 
@@ -75,9 +78,34 @@ that provider's API key. The Deepgram config in the file is only an example;
 Azure and others work too (installed engines: ASR = deepgram, azure; TTS =
 deepgram, azure, cartesia, rime).
 
+For a bot that mixes Deepgram Flux and Aura voices, select the custom engine by
+its dotted import path. A `flux-*` model automatically changes the configured
+`/v1/speak` path to `/v2/speak`; Aura models use `/v1/speak`. An optional
+per-language `endpoint` takes precedence when a proxy uses different routes:
+
+```yaml
+tts:
+  name: channels.deepgram_tts.EndpointAwareDeepgramTTS
+  endpoint: wss://proxy/Voicebot-deepgram/v1/speak
+  language_map:
+    en-GB:
+      language: en
+      model: flux-colin-en
+    fr-BE:
+      language: fr-fr
+      model: aura-2-agathe-fr
+    nl-BE:
+      language: nl-nl
+      model: aura-2-daphne-nl
+      # endpoint: wss://another-proxy/deepgram/v1/speak
+```
+
 **Use `language_map` for ASR/TTS** (Rasa Pro 3.17). Keys must match your bot's
 `language` / `additional_languages` in `config.yml` (e.g. `en` or `en-US`).
 The orb's `lang` query param must be one of those keys.
+
+**`sample_rate`** (same as Inspector): `8000`, `24000`, or `48000` (default).
+The orb `?rate=` must match.
 
 **Barge-in** uses the standard `interruptions:` block (`enabled`, `min_words`) —
 same as Inspector and other voice channels. Do not add a `cfm:` block; it is
@@ -123,13 +151,12 @@ Configurable via URL query parameters — no file editing needed:
 | `ws`       | —                | Full WebSocket URL. Overrides `projectUrl`/`host`/`port`/`channel` when set. |
 | `title`    | `Voice Assistant`| Text shown above the orb.                                          |
 | `lang`     | `en-US`          | Language key sent on connect; must match a `language_map` entry.   |
-| `rate`     | `48000`          | Audio sample rate; must be `48000` or `24000` — see note below.    |
+| `rate`     | `48000`          | Must match credentials `sample_rate` (`8000`, `24000`, or `48000`). |
 
-> **Sample rate note:** The orb decodes bot audio as Linear-16 PCM. The channel
-> selects the matching format automatically (`L16_48KHZ` at 48 kHz,
-> `L16_24KHZ` at 24 kHz). `?rate=8000` would select `MULAW_8KHZ`, which the
-> browser cannot decode — audio would be unintelligible. Stick to 48 kHz
-> (default) or 24 kHz.
+> **Sample rate note:** Set `sample_rate` on the channel in `credentials.yml`
+> (same as Inspector). The orb wire format is always Linear-16 PCM; at
+> `8000` the channel converts to/from μ-law for ASR/TTS. Keep
+> `orb.html?rate=` equal to credentials `sample_rate`.
 
 Examples:
 
@@ -209,7 +236,7 @@ Everything else in the UI works without this.
 The orb speaks the custom `websockets` wire protocol over one WebSocket:
 
 **Client → server**
-- `{ "sample_rate": 48000, "language": "en-US" }` — sent once on connect
+- `{ "sample_rate": 48000, "language": "en-US" }` — sent once on connect; `sample_rate` must match credentials (channel is authoritative)
 - `{ "audio": "<base64 Int16 PCM>" }` — microphone audio, streamed continuously
 - `{ "marker": "<id>" }` — echoed once buffered bot audio finishes playing
 
@@ -235,7 +262,7 @@ The orb speaks the custom `websockets` wire protocol over one WebSocket:
 | Mic permission never prompts         | Serve over `http://localhost` (step 4), not a bare `file://` path.                  |
 | Transcript/skill labels never appear | Those come from the custom channel — make sure you're on `/webhooks/websockets/`, not the built-in `browser_audio`. |
 | API lane in timeline stays empty     | Expected unless you wire up `trace_utils.py` (see above).                           |
-| Bot audio garbled / chipmunky        | Bot channel `sample_rate` ≠ orb `rate`. Check the console warning; reconnect with `?rate=<value>`. Only `48000` and `24000` are valid for the orb — see the sample rate note in Configuration above. |
+| Bot audio garbled / chipmunky        | Credentials `sample_rate` ≠ orb `?rate=`. Match them (channel logs a warning). Supported: `8000`, `24000`, `48000`. |
 | `TypeError` / channel init failure   | Confirm you are on Rasa Pro **3.17+** and using this branch's `websockets.py`. |
 | Language ignored / ASR wrong language | Orb `lang` is not a key in ASR/TTS `language_map`. Align `lang`, `config.yml`, and credentials. |
 | Barge-in never fires                 | Set `interruptions.enabled: true` (and optionally `min_words`) in the channel credentials. |
