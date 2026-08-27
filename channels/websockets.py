@@ -10,6 +10,7 @@ Requires only packages already provided by Rasa Pro (``sanic``, ``structlog``,
 from __future__ import annotations
 
 import asyncio
+import audioop
 import base64
 import json
 import os
@@ -128,8 +129,16 @@ class WebsocketsOutputChannel(VoiceOutputChannel):
     def rasa_audio_bytes_to_channel_bytes(
         self, rasa_audio_bytes: RasaAudioBytes
     ) -> bytes:
-        """Unwrap Rasa's typed audio container to raw bytes for the browser."""
-        return rasa_audio_bytes.data
+        """Convert Rasa audio to Linear-16 PCM for the browser.
+
+        At 8 kHz the engine uses μ-law; convert to L16 so the orb can decode
+        Int16 PCM at every supported sample rate (same as Inspector).
+        """
+        if self.audio_format == MULAW_8KHZ:
+            return audioop.ulaw2lin(rasa_audio_bytes.data, 2)
+        if self.audio_format in (L16_24KHZ, L16_48KHZ):
+            return rasa_audio_bytes.data
+        raise ValueError(f"Unsupported audio format: {self.audio_format}")
 
     def channel_bytes_to_message(
         self, recipient_id: str, channel_bytes: bytes
@@ -181,7 +190,8 @@ class WebSocketsInputChannel(VoiceInputChannel):
     """Receives browser mic audio and drives ASR/TTS for the voice orb.
 
     Features:
-    - Client-provided sample rate and language (matched to ``language_map``)
+    - Credentials ``sample_rate`` (same as Inspector): 8000, 24000, or 48000
+    - Client language on connect (matched to ``language_map``)
     - Optional WAV recording for debugging
     - Barge-in via standard ``interruptions`` credentials
     - Transcript / skill / tool-call events for the orb UI
@@ -196,6 +206,7 @@ class WebSocketsInputChannel(VoiceInputChannel):
         tts_config: Dict[str, Any],
         recording: bool = False,
         interruptions: Optional[Dict[str, Any]] = None,
+        sample_rate: int = _DEFAULT_SAMPLE_RATE,
         **_: Any,
     ) -> None:
         """Create the channel.
@@ -209,11 +220,13 @@ class WebSocketsInputChannel(VoiceInputChannel):
             tts_config: TTS engine configuration (with ``language_map``).
             recording: When True, write user audio under ``recordings/``.
             interruptions: Barge-in settings (``enabled``, ``min_words``).
+            sample_rate: Audio sample rate in Hz (8000, 24000, or 48000).
         """
         super().__init__(server_url, asr_config, tts_config, interruptions)
+        self.audio_format = _SAMPLE_RATE_TO_FORMAT[sample_rate]
         self._recording_enabled = recording
         self._wav_file: Optional[wave.Wave_write] = None
-        self._sample_rate = _DEFAULT_SAMPLE_RATE
+        self._sample_rate = sample_rate
         self._is_user_speaking = False
         self._channel_websocket: Optional[Websocket] = None
         # Must be a key present in ASR/TTS language_map after connect.
@@ -230,13 +243,31 @@ class WebSocketsInputChannel(VoiceInputChannel):
     ) -> "WebSocketsInputChannel":
         """Build the channel from a credentials.yml block."""
         cls.validate_basic_credentials(credentials)
-        return cls(**repack_voice_credentials(credentials or {}))
+        new_creds = repack_voice_credentials(credentials or {})
+        if (
+            new_creds.get("sample_rate") is not None
+            and new_creds["sample_rate"] not in _SAMPLE_RATE_TO_FORMAT
+        ):
+            raise ValueError(
+                f"Unsupported sample rate: {new_creds['sample_rate']}. "
+                f"Supported rates are: {list(_SAMPLE_RATE_TO_FORMAT.keys())}"
+            )
+        return cls(**new_creds)
 
     def channel_bytes_to_rasa_audio_bytes(
         self, input_bytes: bytes
     ) -> RasaAudioBytes:
-        """Wrap raw browser audio bytes in Rasa's typed audio container."""
-        return RasaAudioBytes(data=input_bytes, format=self.audio_format)
+        """Convert browser Linear-16 PCM into Rasa's typed audio container.
+
+        At 8 kHz the engine expects μ-law; convert from L16 (same as Inspector).
+        """
+        if self.audio_format == MULAW_8KHZ:
+            transcoded = audioop.lin2ulaw(input_bytes, 2)
+        elif self.audio_format in (L16_24KHZ, L16_48KHZ):
+            transcoded = input_bytes
+        else:
+            raise ValueError(f"Unsupported audio format: {self.audio_format}")
+        return RasaAudioBytes(data=transcoded, format=self.audio_format)
 
     def create_output_channel(
         self, voice_websocket: Websocket, tts_engine: TTSEngine
@@ -246,7 +277,7 @@ class WebSocketsInputChannel(VoiceInputChannel):
             voice_websocket,
             tts_engine,
             self.tts_cache,
-            tts_engine.audio_format,
+            self.audio_format,
             min_delay_between_bot_messages_seconds=0.2,
         )
 
@@ -255,18 +286,22 @@ class WebSocketsInputChannel(VoiceInputChannel):
         channel_websocket: Websocket,
         request: Optional[Any] = None,
     ) -> Optional[CallParameters]:
-        """Read the browser handshake and prepare audio/language for the call."""
+        """Read the browser handshake and prepare language for the call.
+
+        Sample rate comes from credentials (like Inspector), not the client.
+        The orb ``?rate=`` query param must match credentials ``sample_rate``.
+        """
         self._channel_websocket = channel_websocket
 
-        sample_rate = _DEFAULT_SAMPLE_RATE
         requested_language = call_state.current_language
+        client_sample_rate: Optional[int] = None
 
         try:
             init_message = await asyncio.wait_for(
                 channel_websocket.recv(), timeout=5.0
             )
             init_data = json.loads(init_message)
-            sample_rate = init_data.get("sample_rate", sample_rate)
+            client_sample_rate = init_data.get("sample_rate")
             requested_language = init_data.get("language", requested_language)
         except asyncio.TimeoutError:
             logger.warning("websockets.call_parameters_timeout")
@@ -275,21 +310,32 @@ class WebSocketsInputChannel(VoiceInputChannel):
                 "websockets.call_parameters_parse_error", error=str(e)
             )
 
+        if (
+            client_sample_rate is not None
+            and client_sample_rate != self._sample_rate
+        ):
+            logger.warning(
+                "websockets.sample_rate_mismatch",
+                client_sample_rate=client_sample_rate,
+                channel_sample_rate=self._sample_rate,
+                message=(
+                    "Orb ?rate= must match credentials sample_rate; "
+                    "using credentials value."
+                ),
+            )
+
         call_id = f"WebSockets-{uuid.uuid4()}"
-        self.audio_format = _SAMPLE_RATE_TO_FORMAT.get(
-            sample_rate, _SAMPLE_RATE_TO_FORMAT[_DEFAULT_SAMPLE_RATE]
-        )
         self.language = self._resolve_language_key(requested_language)
-        self._sample_rate = sample_rate
 
         logger.info(
             "websockets.call_parameters_collected",
             call_id=call_id,
-            sample_rate=sample_rate,
+            sample_rate=self._sample_rate,
+            audio_format=self.audio_format,
             requested_language=requested_language,
             resolved_language=self.language,
         )
-        self._start_recording(call_id, "browser", sample_rate)
+        self._start_recording(call_id, "browser", self._sample_rate)
 
         return CallParameters(
             call_id=call_id,

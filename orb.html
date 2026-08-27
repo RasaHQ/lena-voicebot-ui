@@ -590,7 +590,7 @@ function getAvgLevel(analyser, data) {
 }
 
 function ensureAudioCtx() {
-  if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 48000 });
+  if (!audioCtx) audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
   if (audioCtx.state === 'suspended') audioCtx.resume();
 }
 
